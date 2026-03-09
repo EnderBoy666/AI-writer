@@ -1,256 +1,22 @@
 import gradio as gr
-import sqlite3
-from ollama import Client
-from settings import OllamaSettings, GradioSettings, DatabaseSettings, ChapterSettings, OutlineSettings, ClueSettings
+from settings import GradioSettings, DatabaseSettings, ChapterSettings, OutlineSettings, ClueSettings, OutlineGenerationSettings
+from database import init_db, add_novel, get_all_novels, get_novel_by_id, update_novel, delete_novel, get_novel_chapters, get_next_chapter_number, get_chapter_by_id, update_chapter, delete_chapter, add_clue, get_novel_clues, update_clue_next_chapter, delete_clue
+from generator import generate_outline, extract_title, generate_chapter, extract_clues_from_chapter
 
 # 加载设置
-ollama_settings = OllamaSettings()
 gradio_settings = GradioSettings()
 db_settings = DatabaseSettings()
 chapter_settings = ChapterSettings()
 outline_settings = OutlineSettings()
 clue_settings = ClueSettings()
-
-# 初始化Ollama客户端
-client = Client(host=ollama_settings.base_url)
-
-# 初始化数据库
-def init_db():
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    
-    # 检查novels表是否存在
-    cursor.execute(f"""
-    SELECT name FROM sqlite_master WHERE type='table' AND name='{db_settings.db_table}';
-    """)
-    table_exists = cursor.fetchone() is not None
-    
-    if not table_exists:
-        # 创建小说表
-        cursor.execute(f"""
-        CREATE TABLE IF NOT EXISTS {db_settings.db_table} (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            prompt TEXT NOT NULL,
-            outline TEXT NOT NULL,
-            total_chapters INTEGER,
-            chapter_word_count INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-    else:
-        # 检查是否需要添加total_chapters字段
-        cursor.execute(f"""
-        PRAGMA table_info({db_settings.db_table});
-        """)
-        columns = [column[1] for column in cursor.fetchall()]
-        if 'total_chapters' not in columns:
-            cursor.execute(f"""
-            ALTER TABLE {db_settings.db_table} ADD COLUMN total_chapters INTEGER;
-            """)
-        if 'chapter_word_count' not in columns:
-            cursor.execute(f"""
-            ALTER TABLE {db_settings.db_table} ADD COLUMN chapter_word_count INTEGER;
-            """)
-    
-    # 创建章节表
-    cursor.execute(f"""
-    CREATE TABLE IF NOT EXISTS {db_settings.chapter_table} (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        novel_id INTEGER NOT NULL,
-        chapter_number INTEGER NOT NULL,
-        chapter_title TEXT NOT NULL,
-        content TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (novel_id) REFERENCES {db_settings.db_table} (id)
-    )
-    """)
-    
-    # 创建线索表
-    cursor.execute(f"""
-    CREATE TABLE IF NOT EXISTS clues (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        novel_id INTEGER NOT NULL,
-        clue_text TEXT NOT NULL,
-        clue_type TEXT NOT NULL,  -- 明潮或暗涌
-        first_chapter INTEGER NOT NULL,
-        next_chapter INTEGER,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (novel_id) REFERENCES {db_settings.db_table} (id)
-    )
-    """)
-    
-    conn.commit()
-    conn.close()
+outline_gen_settings = OutlineGenerationSettings()
 
 # 初始化数据库
 init_db()
 
-# 数据库操作函数
-def add_novel(title, prompt, outline, total_chapters=None, chapter_word_count=None):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    INSERT INTO {db_settings.db_table} (title, prompt, outline, total_chapters, chapter_word_count) VALUES (?, ?, ?, ?, ?)
-    """, (title, prompt, outline, total_chapters, chapter_word_count))
-    conn.commit()
-    conn.close()
-    return "小说已保存到数据库"
-
-def get_all_novels():
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    SELECT id, title, prompt, created_at FROM {db_settings.db_table} ORDER BY created_at DESC
-    """)
-    novels = cursor.fetchall()
-    conn.close()
-    return novels
-
-def get_novel_by_id(novel_id):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    SELECT title, prompt, outline FROM {db_settings.db_table} WHERE id = ?
-    """, (novel_id,))
-    novel = cursor.fetchone()
-    conn.close()
-    return novel
-
-def update_novel(novel_id, title, prompt, outline):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    UPDATE {db_settings.db_table} SET title = ?, prompt = ?, outline = ? WHERE id = ?
-    """, (title, prompt, outline, novel_id))
-    conn.commit()
-    conn.close()
-    return "小说已更新"
-
-def delete_novel(novel_id):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    # 删除小说的所有章节
-    cursor.execute(f"""
-    DELETE FROM {db_settings.chapter_table} WHERE novel_id = ?
-    """, (novel_id,))
-    # 删除小说
-    cursor.execute(f"""
-    DELETE FROM {db_settings.db_table} WHERE id = ?
-    """, (novel_id,))
-    conn.commit()
-    conn.close()
-    return "小说已删除"
-
-# 章节相关函数
-def add_chapter(novel_id, chapter_number, chapter_title, content):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    INSERT INTO {db_settings.chapter_table} (novel_id, chapter_number, chapter_title, content) VALUES (?, ?, ?, ?)
-    """, (novel_id, chapter_number, chapter_title, content))
-    conn.commit()
-    conn.close()
-    return "章节已保存"
-
-def get_novel_chapters(novel_id):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    SELECT id, chapter_number, chapter_title, created_at FROM {db_settings.chapter_table} WHERE novel_id = ? ORDER BY chapter_number ASC
-    """, (novel_id,))
-    chapters = cursor.fetchall()
-    conn.close()
-    # 将元组转换为列表，确保DataFrame组件能正确显示
-    return [list(chapter) for chapter in chapters]
-
-def get_next_chapter_number(novel_id):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    SELECT MAX(chapter_number) FROM {db_settings.chapter_table} WHERE novel_id = ?
-    """, (novel_id,))
-    max_chapter = cursor.fetchone()[0]
-    conn.close()
-    return (max_chapter + 1) if max_chapter else 1
-
-def get_chapter_by_id(chapter_id):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    print(f"get_chapter_by_id called with chapter_id: {chapter_id}")  # 调试信息
-    cursor.execute(f"""
-    SELECT chapter_number, chapter_title, content FROM {db_settings.chapter_table} WHERE id = ?
-    """, (chapter_id,))
-    chapter = cursor.fetchone()
-    print(f"Retrieved chapter: {chapter}")  # 调试信息
-    conn.close()
-    return chapter
-
-def update_chapter(chapter_id, chapter_number, chapter_title, content):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    UPDATE {db_settings.chapter_table} SET chapter_number = ?, chapter_title = ?, content = ? WHERE id = ?
-    """, (chapter_number, chapter_title, content, chapter_id))
-    conn.commit()
-    conn.close()
-    return "章节已更新"
-
-def delete_chapter(chapter_id):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    DELETE FROM {db_settings.chapter_table} WHERE id = ?
-    """, (chapter_id,))
-    conn.commit()
-    conn.close()
-    return "章节已删除"
-
-# 线索相关函数
-def add_clue(novel_id, clue_text, clue_type, first_chapter, next_chapter=None):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    INSERT INTO clues (novel_id, clue_text, clue_type, first_chapter, next_chapter) VALUES (?, ?, ?, ?, ?)
-    """, (novel_id, clue_text, clue_type, first_chapter, next_chapter))
-    conn.commit()
-    conn.close()
-    return "线索已保存"
-
-def get_novel_clues(novel_id):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    SELECT id, clue_text, clue_type, first_chapter, next_chapter FROM clues WHERE novel_id = ?
-    """, (novel_id,))
-    clues = cursor.fetchall()
-    conn.close()
-    return clues
-
-def update_clue_next_chapter(clue_id, next_chapter):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    UPDATE clues SET next_chapter = ? WHERE id = ?
-    """, (next_chapter, clue_id))
-    conn.commit()
-    conn.close()
-    return "线索已更新"
-
-def delete_clue(clue_id):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    DELETE FROM clues WHERE id = ?
-    """, (clue_id,))
-    conn.commit()
-    conn.close()
-    return "线索已删除"
-
-# 生成章节的函数
-def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_threshold=3):
+# 批量生成章节的函数
+def batch_generate_chapters(novel_id, start_chapter, batch_count, word_count, temperature, clue_threshold, auto_add_clue, clue_count=2):
     # 确保novel_id是整数
-    print(f"novel_id type: {type(novel_id)}, value: {novel_id}")  # 调试信息
     if isinstance(novel_id, list):
         # 处理嵌套列表，如 [['2', '九霄天命']]
         while isinstance(novel_id, list) and len(novel_id) > 0:
@@ -262,7 +28,10 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
         if isinstance(novel_id, str):
             # 尝试提取ID部分
             try:
-                novel_id = int(novel_id)
+                if ':' in novel_id:
+                    novel_id = int(novel_id.split(':')[0].strip())
+                else:
+                    novel_id = int(novel_id)
             except ValueError:
                 return "无效的小说ID"
         else:
@@ -282,151 +51,56 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
         except (ValueError, TypeError):
             return "无效的小说ID"
     
-    # 获取小说信息
+    # 获取小说信息（大纲和总章节数）
+    import sqlite3
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
     cursor.execute(f"""
-    SELECT title, outline, total_chapters FROM {db_settings.db_table} WHERE id = ?
+    SELECT outline, total_chapters FROM {db_settings.db_table} WHERE id = ?
     """, (novel_id,))
-    novel = cursor.fetchone()
+    novel_info = cursor.fetchone()
     conn.close()
     
-    if not novel:
+    if not novel_info:
         return "小说不存在"
     
-    novel_title, outline, total_chapters = novel
+    novel_outline, total_chapters = novel_info
     
-    # 获取上一章节内容
-    previous_chapter = None
-    if chapter_number > 1:
+    # 批量生成章节
+    generated_chapters = []
+    for i in range(batch_count):
+        current_chapter = start_chapter + i
+        # 检查章节编号是否已存在
         conn = sqlite3.connect(db_settings.db_path)
         cursor = conn.cursor()
         cursor.execute(f"""
-        SELECT content FROM {db_settings.chapter_table} WHERE novel_id = ? AND chapter_number = ?
-        """, (novel_id, chapter_number - 1))
-        previous = cursor.fetchone()
+        SELECT id FROM {db_settings.chapter_table} WHERE novel_id = ? AND chapter_number = ?
+        """, (novel_id, current_chapter))
+        existing_chapter = cursor.fetchone()
         conn.close()
-        if previous:
-            previous_chapter = previous[0]
+        
+        if existing_chapter:
+            return f"章节 {current_chapter} 已经存在，请修改起始章节编号"
+        
+        # 生成章节
+        result = generate_chapter(novel_id, current_chapter, word_count, temperature, clue_threshold)
+        if isinstance(result, tuple):
+            chapter_content, _ = result
+            generated_chapters.append(f"第{current_chapter}章")
+            
+            # 自动添加线索
+            if auto_add_clue:
+                extracted_clues = extract_clues_from_chapter(chapter_content, current_chapter, novel_outline, total_chapters, clue_count)
+                for clue_text, clue_type, first_chapter, next_chapter in extracted_clues:
+                    add_clue(novel_id, clue_text, clue_type, first_chapter, next_chapter)
+        else:
+            return f"生成第{current_chapter}章失败: {result}"
     
-    # 获取小说的线索
-    clues = get_novel_clues(novel_id)
-    active_clues = []
-    for clue in clues:
-        clue_id, clue_text, clue_type, first_chapter, next_chapter = clue
-        # 如果线索应该在本章或之前出现，且尚未在本章之后安排出现
-        if (next_chapter is None or next_chapter <= chapter_number):
-            active_clues.append((clue_id, clue_text, clue_type, first_chapter))
-    
-    # 构建系统提示
-    system_prompt = f"你是一位专业的小说作家，擅长根据大纲和上一章节生成新的章节。请根据以下信息生成第{chapter_number}章：\n"
-    system_prompt += f"小说标题：{novel_title}\n"
-    system_prompt += f"小说大纲：{outline}\n"
-    if previous_chapter:
-        system_prompt += f"上一章节内容：{previous_chapter}\n"
-    
-    # 添加线索信息
-    if active_clues:
-        system_prompt += "\n当前需要考虑的线索：\n"
-        for _, clue_text, clue_type, first_chapter in active_clues:
-            system_prompt += f"- {clue_type}：{clue_text}（首次出现于第{first_chapter}章）\n"
-    
-    # 添加章节数和阈值信息
-    if total_chapters:
-        system_prompt += f"\n小说总章节数：{total_chapters}章\n"
-        system_prompt += f"当前是第{chapter_number}章\n"
-        # 检查是否接近结尾
-        if total_chapters - chapter_number <= clue_threshold:
-            system_prompt += f"注意：已接近小说结尾（剩余{total_chapters - chapter_number}章），请适当收束线索。\n"
-    
-    system_prompt += f"\n请生成第{chapter_number}章，字数约{word_count}字，风格保持一致，情节连贯。"
-    
-    # 生成章节
-    response = client.generate(
-        model=ollama_settings.model,
-        prompt=system_prompt,
-        options={"temperature": temperature, "max_tokens": word_count * 2}  # 假设每个字平均2个token
-    )
-    
-    chapter_content = response["response"]
-    
-    # 提取章节标题
-    chapter_title = f"第{chapter_number}章"
-    lines = chapter_content.split('\n')
-    for line in lines:
-        if line.startswith(f"第{chapter_number}章"):
-            chapter_title = line.strip()
-            break
-    
-    # 检查章节编号是否已存在
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    SELECT id FROM {db_settings.chapter_table} WHERE novel_id = ? AND chapter_number = ?
-    """, (novel_id, chapter_number))
-    existing_chapter = cursor.fetchone()
-    conn.close()
-    
-    if existing_chapter:
-        return f"章节 {chapter_number} 已经存在，请修改章节编号"
-    
-    # 保存章节
-    add_chapter(novel_id, chapter_number, chapter_title, chapter_content)
-    
-    # 更新线索的下次出现时间
-    if total_chapters:
-        for clue_id, _, _, first_chapter in active_clues:
-            # 预估下次线索出现的章节
-            # 基于线索首次出现的章节和总章节数
-            chapters_passed = chapter_number - first_chapter
-            if chapters_passed > 0:
-                # 简单算法：平均间隔章节数
-                avg_interval = max(1, (total_chapters - first_chapter) // 3)  # 假设线索出现3次
-                next_chapter_estimate = chapter_number + avg_interval
-                # 确保不超过总章节数
-                next_chapter_estimate = min(next_chapter_estimate, total_chapters)
-                update_clue_next_chapter(clue_id, next_chapter_estimate)
-    
-    # 添加线索分析结果到章节内容末尾
-    if active_clues and total_chapters:
-        chapter_content += "\n\n=== 线索分析 ===\n"
-        chapter_content += f"当前章节：第{chapter_number}章\n"
-        chapter_content += f"小说总章节数：{total_chapters}章\n"
-        if total_chapters - chapter_number <= clue_threshold:
-            chapter_content += f"提示：已接近小说结尾，剩余{total_chapters - chapter_number}章\n"
-        chapter_content += "\n活跃线索及预估下次出现章节：\n"
-        for clue_id, clue_text, clue_type, first_chapter in active_clues:
-            # 获取更新后的下次出现章节
-            conn = sqlite3.connect(db_settings.db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT next_chapter FROM clues WHERE id = ?", (clue_id,))
-            next_chapter = cursor.fetchone()[0]
-            conn.close()
-            chapter_content += f"- {clue_type}：{clue_text} → 预计下次出现于第{next_chapter}章\n"
-    
-    # 返回章节内容和一个标志，表示生成成功
-    return chapter_content, True
-
-# 生成小说大纲的函数
-def generate_outline(prompt, chapter_count, chapter_word_count):
-    system_prompt = f"你是一位专业的小说编辑，擅长根据提示词生成详细的小说大纲。请根据用户提供的提示词，生成一个结构完整、逻辑清晰的小说大纲，包括：\n1. 小说标题\n2. 故事梗概\n3. 主要角色\n4. 章节大纲（共{chapter_count}章，每章约{chapter_word_count}字）\n5. 故事高潮和结局，禁止使用markdown格式"
-    
-    response = client.generate(
-        model=ollama_settings.model,
-        prompt=f"{system_prompt}\n\n提示词：{prompt}",
-        options={"temperature": 0.7, "max_tokens": 3000}
-    )
-    
-    return response["response"]
-
-# 从大纲中提取标题
-def extract_title(outline):
-    lines = outline.split('\n')
-    for line in lines:
-        if line.startswith('1. 小说标题') or line.startswith('小说标题'):
-            title = line.split('：')[1].strip() if '：' in line else line.split(':')[1].strip()
-            return title
-    return "未知标题"
+    # 构建返回信息
+    if generated_chapters:
+        return f"成功生成章节: {', '.join(generated_chapters)}"
+    else:
+        return "未生成任何章节"
 
 # 创建Gradio界面
 with gr.Blocks(title=gradio_settings.title) as demo:
@@ -457,6 +131,20 @@ with gr.Blocks(title=gradio_settings.title) as demo:
                         minimum=outline_settings.min_chapter_word_count,
                         maximum=outline_settings.max_chapter_word_count,
                         step=100
+                    )
+                    chapter_interval = gr.Number(
+                        label="章节间隔",
+                        value=outline_settings.default_chapter_interval,
+                        minimum=outline_settings.min_chapter_interval,
+                        maximum=outline_settings.max_chapter_interval,
+                        step=1
+                    )
+                    recursion_depth = gr.Number(
+                        label="递归深度",
+                        value=outline_gen_settings.default_recursion_depth,
+                        minimum=outline_gen_settings.min_recursion_depth,
+                        maximum=outline_gen_settings.max_recursion_depth,
+                        step=1
                     )
                     generate_btn = gr.Button("生成大纲")
                 
@@ -539,6 +227,25 @@ with gr.Blocks(title=gradio_settings.title) as demo:
                         step=1
                     )
                     generate_chapter_btn = gr.Button("生成章节")
+                    # 批量编写控件
+                    batch_chapter_count = gr.Number(
+                        label="批量编写章节数",
+                        value=1,
+                        minimum=1,
+                        step=1
+                    )
+                    auto_add_clue = gr.Checkbox(
+                        label="自动添加线索",
+                        value=False
+                    )
+                    clue_count = gr.Number(
+                        label="每章线索数量",
+                        value=2,
+                        minimum=1,
+                        maximum=10,
+                        step=1
+                    )
+                    batch_generate_btn = gr.Button("批量生成章节")
                 
                 with gr.Column():
                     chapter_content = gr.Textbox(
@@ -547,6 +254,7 @@ with gr.Blocks(title=gradio_settings.title) as demo:
                     )
                     chapter_status = gr.Textbox(label="生成状态", interactive=False)
                     show_clue_dialog = gr.State(False)  # 用于控制线索对话框的显示
+                    batch_status = gr.Textbox(label="批量生成状态", interactive=False)
             
             # 章节列表
             chapter_list = gr.Dataframe(
@@ -633,25 +341,32 @@ with gr.Blocks(title=gradio_settings.title) as demo:
     # 绑定生成函数
     generate_btn.click(
         fn=generate_outline,
-        inputs=[prompt_input, chapter_count, chapter_word_count],
+        inputs=[prompt_input, chapter_count, chapter_word_count, chapter_interval, recursion_depth],
         outputs=outline_output
     )
     
     # 绑定保存函数
-    def save_novel(prompt, outline, chapter_count, chapter_word_count):
+    def save_novel_to_db(outline):
+        if not outline:
+            return "大纲不能为空"
         title = extract_title(outline)
-        result = add_novel(title, prompt, outline, chapter_count, chapter_word_count)
-        return result
+        # 确保提示词不为空
+        prompt = prompt_input.value if prompt_input.value else f"{title}的小说"
+        return add_novel(title, prompt, outline)
     
     save_btn.click(
-        fn=save_novel,
-        inputs=[prompt_input, outline_output, chapter_count, chapter_word_count],
+        fn=save_novel_to_db,
+        inputs=outline_output,
         outputs=save_status
     )
     
-    # 绑定刷新列表函数
+    # 绑定刷新小说列表函数
+    def refresh_novel_list():
+        novels = get_all_novels()
+        return novels
+    
     refresh_btn.click(
-        fn=get_all_novels,
+        fn=refresh_novel_list,
         outputs=novel_list
     )
     
@@ -701,14 +416,25 @@ with gr.Blocks(title=gradio_settings.title) as demo:
     def update_chapter_number(novel_id_str):
         if not novel_id_str:
             return 1
-        # 处理嵌套列表，如 [['2', '九霄天命']]
+        # 确保novel_id_str是字符串或整数
         if isinstance(novel_id_str, list):
+            # 处理嵌套列表，如 [['2', '九霄天命']]
             while isinstance(novel_id_str, list) and len(novel_id_str) > 0:
                 novel_id_str = novel_id_str[0]
+            # 现在novel_id_str应该是字符串 '2' 或 ['2', '九霄天命']
             if isinstance(novel_id_str, list) and len(novel_id_str) > 0:
+                # 格式为 ['2', '九霄天命']
                 novel_id_str = novel_id_str[0]
-        # 提取小说ID
-        if isinstance(novel_id_str, str):
+            if isinstance(novel_id_str, str):
+                # 尝试提取ID部分
+                try:
+                    novel_id = int(novel_id_str)
+                except ValueError:
+                    return 1
+            else:
+                return 1
+        elif isinstance(novel_id_str, str):
+            # 尝试从字符串中提取ID
             try:
                 if ':' in novel_id_str:
                     novel_id = int(novel_id_str.split(':')[0].strip())
@@ -721,7 +447,6 @@ with gr.Blocks(title=gradio_settings.title) as demo:
                 novel_id = int(novel_id_str)
             except (ValueError, TypeError):
                 return 1
-        # 获取下一个章节数
         return get_next_chapter_number(novel_id)
     
     # 绑定小说选择变化事件
@@ -767,6 +492,13 @@ with gr.Blocks(title=gradio_settings.title) as demo:
     no_btn.click(
         fn=handle_no,
         outputs=[clue_dialog, show_clue_dialog]
+    )
+    
+    # 批量生成章节
+    batch_generate_btn.click(
+        fn=batch_generate_chapters,
+        inputs=[novel_selector, chapter_number, batch_chapter_count, word_count, temperature, clue_threshold, auto_add_clue, clue_count],
+        outputs=batch_status
     )
     
     # 刷新章节列表
@@ -831,26 +563,25 @@ with gr.Blocks(title=gradio_settings.title) as demo:
     
     chapter_list.select(
         fn=load_chapter,
-        inputs=chapter_list,
+        inputs=[chapter_list],
         outputs=[chapter_id, chapter_num, chapter_title, chapter_text]
     )
     
-    # 更新章节
+    # 绑定更新章节函数
     update_chapter_btn.click(
         fn=update_chapter,
         inputs=[chapter_id, chapter_num, chapter_title, chapter_text],
         outputs=chapter_action_status
     )
     
-    # 删除章节
+    # 绑定删除章节函数
     delete_chapter_btn.click(
         fn=delete_chapter,
         inputs=chapter_id,
         outputs=chapter_action_status
     )
     
-    # 线索管理相关绑定
-    # 添加线索
+    # 绑定添加线索函数
     def add_new_clue(novel_id_str, text, clue_type, chapter):
         if not novel_id_str:
             return "请选择小说"
@@ -937,41 +668,32 @@ with gr.Blocks(title=gradio_settings.title) as demo:
     )
     
     # 加载线索
-    def load_clue(selected_row):
-        if selected_row.empty:
+    def load_clue(selected_row, evt: gr.SelectData):
+        try:
+            # 获取选中行的索引（行号）
+            idx = evt.index[0]
+            # 从数据框中提取该行的 ID（第一列）
+            clue_id = int(selected_row.iloc[idx, 0])
+            # 获取线索内容
+            clues = get_novel_clues(novel_id.value)
+            for clue in clues:
+                if clue[0] == clue_id:
+                    return [clue_id, clue[1], clue[2], clue[3]]
             return [0, "", "明潮", 1]
-        clue_id = int(selected_row.iloc[0, 0])
-        # 获取线索详情
-        conn = sqlite3.connect(db_settings.db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT clue_text, clue_type, first_chapter FROM clues WHERE id = ?", (clue_id,))
-        clue = cursor.fetchone()
-        conn.close()
-        if clue:
-            return [clue_id, clue[0], clue[1], clue[2]]
-        return [0, "", "明潮", 1]
+        except Exception as e:
+            print(f"Error in load_clue: {e}")
+            return [0, "", "明潮", 1]
     
     clue_list.select(
         fn=load_clue,
-        inputs=clue_list,
+        inputs=[clue_list],
         outputs=[clue_id, clue_text_edit, clue_type_edit, clue_chapter_edit]
     )
     
-    # 更新线索
-    def update_clue(clue_id, text, clue_type, chapter):
-        if not clue_id:
-            return "请选择线索"
-        # 更新线索
-        conn = sqlite3.connect(db_settings.db_path)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE clues SET clue_text = ?, clue_type = ?, first_chapter = ? WHERE id = ?", (text, clue_type, chapter, clue_id))
-        conn.commit()
-        conn.close()
-        return "线索已更新"
-    
+    # 绑定更新线索函数
     update_clue_btn.click(
-        fn=update_clue,
-        inputs=[clue_id, clue_text_edit, clue_type_edit, clue_chapter_edit],
+        fn=update_clue_next_chapter,
+        inputs=[clue_id, clue_chapter_edit],
         outputs=clue_action_status
     )
     
@@ -982,5 +704,11 @@ with gr.Blocks(title=gradio_settings.title) as demo:
         outputs=clue_action_status
     )
 
+    # 初始化
+    demo.load(
+        fn=get_novel_choices,
+        outputs=novel_selector
+    )
+
 if __name__ == "__main__":
-    demo.launch(theme=gradio_settings.theme)
+    demo.launch(theme=gradio_settings.theme, share=True)
