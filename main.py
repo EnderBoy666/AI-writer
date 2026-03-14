@@ -17,41 +17,13 @@ init_db()
 # 批量生成章节的函数
 def batch_generate_chapters(novel_id, start_chapter, batch_count, word_count, temperature, clue_threshold, auto_add_clue, clue_count=2):
     # 确保novel_id是整数
-    if isinstance(novel_id, list):
-        # 处理嵌套列表，如 [['2', '九霄天命']]
-        while isinstance(novel_id, list) and len(novel_id) > 0:
-            novel_id = novel_id[0]
-        # 现在novel_id应该是字符串 '2' 或 ['2', '九霄天命']
-        if isinstance(novel_id, list) and len(novel_id) > 0:
-            # 格式为 ['2', '九霄天命']
-            novel_id = novel_id[0]
-        if isinstance(novel_id, str):
-            # 尝试提取ID部分
-            try:
-                if ':' in novel_id:
-                    novel_id = int(novel_id.split(':')[0].strip())
-                else:
-                    novel_id = int(novel_id)
-            except ValueError:
-                return "无效的小说ID"
-        else:
-            return "无效的小说ID"
-    elif isinstance(novel_id, str):
-        # 尝试从字符串中提取ID
-        try:
-            if ':' in novel_id:
-                novel_id = int(novel_id.split(':')[0].strip())
-            else:
-                novel_id = int(novel_id)
-        except ValueError:
-            return "无效的小说ID"
-    else:
-        try:
-            novel_id = int(novel_id)
-        except (ValueError, TypeError):
-            return "无效的小说ID"
+    print(f"处理小说选择值: {novel_id}")
+    
+    if not novel_id:
+        return "无效的小说ID"
     
     # 获取小说信息（大纲和总章节数）
+    print("正在获取小说信息...")
     import sqlite3
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
@@ -65,11 +37,13 @@ def batch_generate_chapters(novel_id, start_chapter, batch_count, word_count, te
         return "小说不存在"
     
     novel_outline, total_chapters = novel_info
+    print(f"小说总章节数：{total_chapters}")
     
     # 批量生成章节
     generated_chapters = []
     for i in range(batch_count):
         current_chapter = start_chapter + i
+        print(f"\n开始生成第{current_chapter}章...")
         # 检查章节编号是否已存在
         conn = sqlite3.connect(db_settings.db_path)
         cursor = conn.cursor()
@@ -90,9 +64,11 @@ def batch_generate_chapters(novel_id, start_chapter, batch_count, word_count, te
             
             # 自动添加线索
             if auto_add_clue:
+                print(f"正在为第{current_chapter}章添加线索...")
                 extracted_clues = extract_clues_from_chapter(chapter_content, current_chapter, novel_outline, total_chapters, clue_count)
                 for clue_text, clue_type, first_chapter, next_chapter in extracted_clues:
                     add_clue(novel_id, clue_text, clue_type, first_chapter, next_chapter)
+                print("线索添加完成")
         else:
             return f"生成第{current_chapter}章失败: {result}"
     
@@ -146,6 +122,13 @@ with gr.Blocks(title=gradio_settings.title) as demo:
                         maximum=outline_gen_settings.max_recursion_depth,
                         step=1
                     )
+                    temperature = gr.Slider(
+                        label="温度",
+                        minimum=0.1,
+                        maximum=1.0,
+                        value=0.7,
+                        step=0.1
+                    )
                     generate_btn = gr.Button("生成大纲")
                 
                 with gr.Column():
@@ -187,14 +170,16 @@ with gr.Blocks(title=gradio_settings.title) as demo:
         
         # 章节管理标签页
         with gr.Tab("章节管理"):
-            # 选择小说
-            novel_selector = gr.Dropdown(
-                label="选择小说",
-                choices=[],
-                interactive=True,
-                allow_custom_value=True
+            # 选择小说（与管理小说一致）
+            novel_list_chapter = gr.Dataframe(
+                label="小说列表",
+                headers=["ID", "标题", "提示词", "创建时间"],
+                datatype=["number", "str", "str", "str"],
+                interactive=False
             )
             refresh_novels_btn = gr.Button("刷新小说列表")
+            # 显示当前选择的小说ID
+            selected_novel_id = gr.Number(label="当前选择的小说ID", interactive=False)
             
             # 生成章节部分
             with gr.Row():
@@ -341,8 +326,9 @@ with gr.Blocks(title=gradio_settings.title) as demo:
     # 绑定生成函数
     generate_btn.click(
         fn=generate_outline,
-        inputs=[prompt_input, chapter_count, chapter_word_count, chapter_interval, recursion_depth],
-        outputs=outline_output
+        inputs=[prompt_input, chapter_count, chapter_word_count, chapter_interval, recursion_depth, temperature],
+        outputs=outline_output,
+        api_name="generate_outline"
     )
     
     # 绑定保存函数
@@ -402,65 +388,80 @@ with gr.Blocks(title=gradio_settings.title) as demo:
     
     # 章节管理相关绑定
     # 获取小说列表用于下拉选择
-    def get_novel_choices():
+    # 绑定刷新小说列表函数
+    def refresh_novel_list_chapter():
         novels = get_all_novels()
-        return [(str(novel[0]), novel[1]) for novel in novels]
+        return novels
     
-    # 刷新小说下拉列表
     refresh_novels_btn.click(
-        fn=get_novel_choices,
-        outputs=novel_selector
+        fn=refresh_novel_list_chapter,
+        outputs=novel_list_chapter
+    )
+    
+    # 绑定选择小说函数
+    def select_novel_chapter(selected_row, evt: gr.SelectData):
+        print(f"Selected row: {selected_row}")
+        print(f"Selected row type: {type(selected_row)}")
+        print(f"Event index: {evt.index}")
+        
+        try:
+            # 获取选中行的索引
+            row_index = evt.index[0]
+            print(f"Row index: {row_index}")
+            
+            # 尝试处理 pandas DataFrame 格式
+            if hasattr(selected_row, 'iloc'):
+                if selected_row.empty:
+                    return 0
+                novel_id = int(selected_row.iloc[row_index, 0])
+                print(f"Extracted novel_id from DataFrame: {novel_id}")
+                return novel_id
+            # 尝试处理列表格式
+            elif isinstance(selected_row, list):
+                if len(selected_row) > 0:
+                    if isinstance(selected_row[0], list):
+                        # 嵌套列表格式
+                        novel_id = int(selected_row[row_index][0])
+                        print(f"Extracted novel_id from nested list: {novel_id}")
+                        return novel_id
+                    else:
+                        # 单层列表格式
+                        novel_id = int(selected_row[row_index])
+                        print(f"Extracted novel_id from list: {novel_id}")
+                        return novel_id
+        except Exception as e:
+            print(f"Error in select_novel_chapter: {e}")
+        
+        return 0
+    
+    novel_list_chapter.select(
+        fn=select_novel_chapter,
+        inputs=novel_list_chapter,
+        outputs=selected_novel_id
     )
     
     # 当选择小说时，自动填写下一个章节数
-    def update_chapter_number(novel_id_str):
-        if not novel_id_str:
+    def update_chapter_number(novel_id):
+        if not novel_id:
             return 1
-        # 确保novel_id_str是字符串或整数
-        if isinstance(novel_id_str, list):
-            # 处理嵌套列表，如 [['2', '九霄天命']]
-            while isinstance(novel_id_str, list) and len(novel_id_str) > 0:
-                novel_id_str = novel_id_str[0]
-            # 现在novel_id_str应该是字符串 '2' 或 ['2', '九霄天命']
-            if isinstance(novel_id_str, list) and len(novel_id_str) > 0:
-                # 格式为 ['2', '九霄天命']
-                novel_id_str = novel_id_str[0]
-            if isinstance(novel_id_str, str):
-                # 尝试提取ID部分
-                try:
-                    novel_id = int(novel_id_str)
-                except ValueError:
-                    return 1
-            else:
-                return 1
-        elif isinstance(novel_id_str, str):
-            # 尝试从字符串中提取ID
-            try:
-                if ':' in novel_id_str:
-                    novel_id = int(novel_id_str.split(':')[0].strip())
-                else:
-                    novel_id = int(novel_id_str)
-            except ValueError:
-                return 1
-        else:
-            try:
-                novel_id = int(novel_id_str)
-            except (ValueError, TypeError):
-                return 1
-        return get_next_chapter_number(novel_id)
+        
+        if novel_id:
+            return get_next_chapter_number(novel_id)
+        return 1
     
     # 绑定小说选择变化事件
-    novel_selector.change(
+    selected_novel_id.change(
         fn=update_chapter_number,
-        inputs=novel_selector,
+        inputs=selected_novel_id,
         outputs=chapter_number
     )
     
     # 生成章节
     generate_chapter_btn.click(
         fn=generate_chapter,
-        inputs=[novel_selector, chapter_number, word_count, temperature, clue_threshold],
-        outputs=[chapter_content, show_clue_dialog]
+        inputs=[selected_novel_id, chapter_number, word_count, temperature, clue_threshold],
+        outputs=[chapter_content, show_clue_dialog],
+        api_name="generate_chapter"
     )
     
     # 显示线索对话框
@@ -497,50 +498,23 @@ with gr.Blocks(title=gradio_settings.title) as demo:
     # 批量生成章节
     batch_generate_btn.click(
         fn=batch_generate_chapters,
-        inputs=[novel_selector, chapter_number, batch_chapter_count, word_count, temperature, clue_threshold, auto_add_clue, clue_count],
-        outputs=batch_status
+        inputs=[selected_novel_id, chapter_number, batch_chapter_count, word_count, temperature, clue_threshold, auto_add_clue, clue_count],
+        outputs=batch_status,
+        api_name="batch_generate_chapters"
     )
     
     # 刷新章节列表
-    def refresh_chapters(novel_id_str):
-        if not novel_id_str:
+    def refresh_chapters(novel_id):
+        if not novel_id:
             return []
-        # 确保novel_id_str是字符串或整数
-        if isinstance(novel_id_str, list):
-            # 处理嵌套列表，如 [['2', '九霄天命']]
-            while isinstance(novel_id_str, list) and len(novel_id_str) > 0:
-                novel_id_str = novel_id_str[0]
-            # 现在novel_id_str应该是字符串 '2' 或 ['2', '九霄天命']
-            if isinstance(novel_id_str, list) and len(novel_id_str) > 0:
-                # 格式为 ['2', '九霄天命']
-                novel_id_str = novel_id_str[0]
-            if isinstance(novel_id_str, str):
-                # 尝试提取ID部分
-                try:
-                    novel_id = int(novel_id_str)
-                except ValueError:
-                    return []
-            else:
-                return []
-        elif isinstance(novel_id_str, str):
-            # 尝试从字符串中提取ID
-            try:
-                if ':' in novel_id_str:
-                    novel_id = int(novel_id_str.split(':')[0].strip())
-                else:
-                    novel_id = int(novel_id_str)
-            except ValueError:
-                return []
-        else:
-            try:
-                novel_id = int(novel_id_str)
-            except (ValueError, TypeError):
-                return []
-        return get_novel_chapters(novel_id)
+        
+        if novel_id:
+            return get_novel_chapters(novel_id)
+        return []
     
     refresh_chapters_btn.click(
         fn=refresh_chapters,
-        inputs=novel_selector,
+        inputs=selected_novel_id,
         outputs=chapter_list
     )
     
@@ -582,88 +556,26 @@ with gr.Blocks(title=gradio_settings.title) as demo:
     )
     
     # 绑定添加线索函数
-    def add_new_clue(novel_id_str, text, clue_type, chapter):
-        if not novel_id_str:
+    def add_new_clue(novel_id, text, clue_type, chapter):
+        if not novel_id:
             return "请选择小说"
-        # 确保novel_id_str是字符串或整数
-        if isinstance(novel_id_str, list):
-            # 处理嵌套列表，如 [['2', '九霄天命']]
-            while isinstance(novel_id_str, list) and len(novel_id_str) > 0:
-                novel_id_str = novel_id_str[0]
-            # 现在novel_id_str应该是字符串 '2' 或 ['2', '九霄天命']
-            if isinstance(novel_id_str, list) and len(novel_id_str) > 0:
-                # 格式为 ['2', '九霄天命']
-                novel_id_str = novel_id_str[0]
-            if isinstance(novel_id_str, str):
-                # 尝试提取ID部分
-                try:
-                    novel_id = int(novel_id_str)
-                except ValueError:
-                    return "无效的小说ID"
-            else:
-                return "无效的小说ID"
-        elif isinstance(novel_id_str, str):
-            # 尝试从字符串中提取ID
-            try:
-                if ':' in novel_id_str:
-                    novel_id = int(novel_id_str.split(':')[0].strip())
-                else:
-                    novel_id = int(novel_id_str)
-            except ValueError:
-                return "无效的小说ID"
-        else:
-            try:
-                novel_id = int(novel_id_str)
-            except (ValueError, TypeError):
-                return "无效的小说ID"
         return add_clue(novel_id, text, clue_type, chapter)
     
     add_clue_btn.click(
         fn=add_new_clue,
-        inputs=[novel_selector, clue_text, clue_type, clue_chapter],
+        inputs=[selected_novel_id, clue_text, clue_type, clue_chapter],
         outputs=clue_status
     )
     
     # 刷新线索列表
-    def refresh_clues(novel_id_str):
-        if not novel_id_str:
+    def refresh_clues(novel_id):
+        if not novel_id:
             return []
-        # 确保novel_id_str是字符串或整数
-        if isinstance(novel_id_str, list):
-            # 处理嵌套列表，如 [['2', '九霄天命']]
-            while isinstance(novel_id_str, list) and len(novel_id_str) > 0:
-                novel_id_str = novel_id_str[0]
-            # 现在novel_id_str应该是字符串 '2' 或 ['2', '九霄天命']
-            if isinstance(novel_id_str, list) and len(novel_id_str) > 0:
-                # 格式为 ['2', '九霄天命']
-                novel_id_str = novel_id_str[0]
-            if isinstance(novel_id_str, str):
-                # 尝试提取ID部分
-                try:
-                    novel_id = int(novel_id_str)
-                except ValueError:
-                    return []
-            else:
-                return []
-        elif isinstance(novel_id_str, str):
-            # 尝试从字符串中提取ID
-            try:
-                if ':' in novel_id_str:
-                    novel_id = int(novel_id_str.split(':')[0].strip())
-                else:
-                    novel_id = int(novel_id_str)
-            except ValueError:
-                return []
-        else:
-            try:
-                novel_id = int(novel_id_str)
-            except (ValueError, TypeError):
-                return []
         return get_novel_clues(novel_id)
     
     refresh_clues_btn.click(
         fn=refresh_clues,
-        inputs=novel_selector,
+        inputs=selected_novel_id,
         outputs=clue_list
     )
     
@@ -706,8 +618,8 @@ with gr.Blocks(title=gradio_settings.title) as demo:
 
     # 初始化
     demo.load(
-        fn=get_novel_choices,
-        outputs=novel_selector
+        fn=refresh_novel_list_chapter,
+        outputs=novel_list_chapter
     )
 
 if __name__ == "__main__":

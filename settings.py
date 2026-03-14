@@ -2,7 +2,7 @@
 class OllamaSettings:
     def __init__(self):
         # 使用的Ollama模型名称
-        self.model = "deepseek-r1:14b"
+        self.model = "qwen3:8b"
         # Ollama服务的基础URL
         self.base_url = "http://localhost:11434"
 
@@ -85,6 +85,16 @@ class TokenSettings:
         self.token_coefficient_chapter = 2
         # 线索提取的最大token数
         self.max_tokens_clue_extraction = 1000
+
+# DeepSeek模型设置
+class DeepSeekSettings:
+    def __init__(self):
+        # 是否启用思考模式
+        self.enable_thinking = True
+        # 思考模式的温度值
+        self.thinking_temperature = 0.7
+        # 思考模式的最大token数
+        self.max_tokens_thinking = 1000
 
 # 大纲生成设置
 class OutlineGenerationSettings:

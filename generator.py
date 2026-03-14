@@ -1,6 +1,7 @@
 from ollama import Client
 import sqlite3
-from settings import OllamaSettings, ChapterSettings, OutlineSettings, DatabaseSettings, TokenSettings, OutlineGenerationSettings
+import json
+from settings import OllamaSettings, ChapterSettings, OutlineSettings, DatabaseSettings, TokenSettings, OutlineGenerationSettings, DeepSeekSettings
 from database import add_chapter, get_novel_clues, update_clue_next_chapter, get_novel_by_id
 
 # 加载数据库设置
@@ -12,12 +13,28 @@ chapter_settings = ChapterSettings()
 outline_settings = OutlineSettings()
 token_settings = TokenSettings()
 outline_gen_settings = OutlineGenerationSettings()
+deepseek_settings = DeepSeekSettings()
 
 # 初始化Ollama客户端
 client = Client(host=ollama_settings.base_url)
 
 # 生成小说大纲的函数
-def generate_outline(prompt, chapter_count, chapter_word_count, chapter_interval, recursion_depth=None):
+def generate_outline(prompt, chapter_count, chapter_word_count, chapter_interval, recursion_depth=None, temperature=0.7):
+    # 输入验证
+    if not prompt or not isinstance(prompt, str):
+        return "提示词不能为空"
+    
+    try:
+        chapter_count = int(chapter_count)
+        chapter_word_count = int(chapter_word_count)
+        chapter_interval = int(chapter_interval)
+        temperature = float(temperature)
+    except (ValueError, TypeError):
+        return "章节数、每章字数、章节间隔和温度必须是数字"
+    
+    # 确保温度在有效范围内
+    temperature = max(0.1, min(temperature, 1.0))
+    
     # 使用默认递归深度如果未指定
     if recursion_depth is None:
         recursion_depth = outline_gen_settings.default_recursion_depth
@@ -26,49 +43,71 @@ def generate_outline(prompt, chapter_count, chapter_word_count, chapter_interval
     recursion_depth = max(outline_gen_settings.min_recursion_depth, min(recursion_depth, outline_gen_settings.max_recursion_depth))
     
     # 第一步：生成基础骨架
-    print(f"开始生成大纲，递归深度：{recursion_depth}")
+    print("开始生成大纲...")
+    print(f"递归深度设置为：{recursion_depth}")
     
     # 生成小说基础信息和骨架
+    # 不使用JSON格式，直接使用文本格式以避免解析问题
     system_prompt_base = f"你是一位专业的小说编辑，擅长根据提示词生成小说骨架。请根据用户提供的提示词，生成一个结构完整的小说骨架。\n\n要求：\n1. 第一行为小说标题\n2. 第二行为故事梗概（1-2句话）\n3. 接下来为主要角色列表（每个角色一行，格式：角色名：角色简介）\n4. 最后为{outline_gen_settings.skeleton_chapter_count}个主要情节节点（每个节点一行，格式：节点X：节点内容）\n5. 禁用所有的markdown格式\n6. 禁止其他所有的输出，只输出骨架内容"
     
-    response_base = client.generate(
-        model=ollama_settings.model,
-        prompt=f"{system_prompt_base}\n\n提示词：{prompt}",
-        options={"temperature": 0.7, "max_tokens": token_settings.max_tokens_outline}
-    )
-    
-    base_skeleton = response_base["response"]
-    print("基础骨架生成完成")
-    
-    # 解析骨架内容
-    title, summary, characters, plot_nodes = parse_skeleton(base_skeleton)
-    
-    if recursion_depth == 1:
-        # 递归深度为1，直接基于骨架生成完整大纲
-        return generate_final_outline(title, summary, characters, plot_nodes, chapter_count, chapter_word_count, chapter_interval)
-    else:
-        # 递归深度大于1，逐步细化
-        current_depth = 1
-        current_outline = base_skeleton
+    print("正在生成小说基础骨架...")
+    try:
+        response_base = client.generate(
+            model=ollama_settings.model,
+            prompt=f"{system_prompt_base}\n\n提示词：{prompt}",
+            options={"temperature": temperature, "max_tokens": token_settings.max_tokens_outline, "thinking": deepseek_settings.enable_thinking}
+        )
         
-        while current_depth < recursion_depth:
-            print(f"开始第{current_depth+1}层递归细化")
-            # 基于当前大纲生成更详细的内容
-            system_prompt_refine = f"你是一位专业的小说编辑，擅长细化小说大纲。请根据以下大纲，生成更详细的版本。\n\n要求：\n1. 保留原有的小说标题、故事梗概和主要角色\n2. 扩展情节节点，增加更多细节和连贯性\n3. 为每个情节节点添加更多具体内容和发展线索\n4. 保持结构清晰，逻辑连贯\n5. 禁用所有的markdown格式\n6. 禁止其他所有的输出，只输出细化后的大纲"
-            
-            response_refine = client.generate(
-                model=ollama_settings.model,
-                prompt=f"{system_prompt_refine}\n\n当前大纲：{current_outline}",
-                options={"temperature": 0.7, "max_tokens": token_settings.max_tokens_outline * 2}
-            )
-            
-            current_outline = response_refine["response"]
-            current_depth += 1
-            print(f"第{current_depth}层递归细化完成")
+        base_skeleton = response_base["response"]
+        if not base_skeleton:
+            return "生成骨架失败，请重试"
         
-        # 最后生成完整的章节大纲
-        print("生成最终章节大纲")
-        return generate_final_outline(title, summary, characters, plot_nodes, chapter_count, chapter_word_count, chapter_interval, current_outline)
+        print("基础骨架生成完成")
+        
+        # 解析骨架内容
+        print("正在解析骨架内容...")
+        title, summary, characters, plot_nodes = parse_skeleton(base_skeleton)
+        
+        if not title:
+            return "无法从骨架中提取标题"
+        
+        print(f"小说标题：{title}")
+        print(f"故事梗概：{summary}")
+        
+        if recursion_depth == 1:
+            # 递归深度为1，直接基于骨架生成完整大纲
+            print("正在生成完整大纲...")
+            outline = generate_final_outline(title, summary, characters, plot_nodes, chapter_count, chapter_word_count, chapter_interval, temperature=temperature)
+            print("大纲生成完成！")
+            return outline
+        else:
+            # 递归深度大于1，逐步细化
+            current_depth = 1
+            current_outline = base_skeleton
+            
+            while current_depth < recursion_depth:
+                print(f"开始第{current_depth+1}层递归细化...")
+                # 基于当前大纲生成更详细的内容
+                system_prompt_refine = f"你是一位专业的小说编辑，擅长细化小说大纲。请根据以下大纲，生成更详细的版本。\n\n要求：\n1. 保留原有的小说标题、故事梗概和主要角色\n2. 扩展情节节点，增加更多细节和连贯性\n3. 为每个情节节点添加更多具体内容和发展线索\n4. 保持结构清晰，逻辑连贯\n5. 禁用所有的markdown格式\n6. 禁止其他所有的输出，只输出细化后的大纲"
+                
+                response_refine = client.generate(
+                    model=ollama_settings.model,
+                    prompt=f"{system_prompt_refine}\n\n当前大纲：{current_outline}",
+                    options={"temperature": temperature, "max_tokens": token_settings.max_tokens_outline * 2, "thinking": deepseek_settings.enable_thinking}
+                )
+                
+                current_outline = response_refine["response"]
+                current_depth += 1
+                print(f"第{current_depth}层递归细化完成")
+            
+            # 最后生成完整的章节大纲
+            print("正在生成最终章节大纲...")
+            outline = generate_final_outline(title, summary, characters, plot_nodes, chapter_count, chapter_word_count, chapter_interval, current_outline, temperature=temperature)
+            print("大纲生成完成！")
+            return outline
+    except Exception as e:
+        print(f"生成大纲时出错：{str(e)}")
+        return f"生成大纲失败：{str(e)}"
 
 # 解析骨架内容的函数
 def parse_skeleton(skeleton):
@@ -97,14 +136,14 @@ def parse_skeleton(skeleton):
     # 解析情节节点
     while i < len(lines):
         line = lines[i].strip()
-        if line and line.startswith("节点"):
+        if line and (line.startswith("节点") or line.startswith("第")):
             plot_nodes.append(line)
         i += 1
     
     return title, summary, characters, plot_nodes
 
 # 生成最终大纲的函数
-def generate_final_outline(title, summary, characters, plot_nodes, chapter_count, chapter_word_count, chapter_interval, previous_outline=None):
+def generate_final_outline(title, summary, characters, plot_nodes, chapter_count, chapter_word_count, chapter_interval, previous_outline=None, temperature=0.7):
     # 构建系统提示
     system_prompt = f"你是一位专业的小说编辑，擅长根据骨架生成详细的章节大纲。请根据以下信息，生成一个完整的小说大纲。\n\n要求：\n1. 第一行为小说标题：{title}\n2. 第二行为故事梗概：{summary}\n3. 接下来为主要角色列表\n"
     
@@ -126,13 +165,21 @@ def generate_final_outline(title, summary, characters, plot_nodes, chapter_count
         for node in plot_nodes:
             prompt += f"{node}\n"
     
-    response = client.generate(
-        model=ollama_settings.model,
-        prompt=prompt,
-        options={"temperature": 0.7, "max_tokens": token_settings.max_tokens_outline * 3}
-    )
-    
-    return response["response"]
+    try:
+        response = client.generate(
+            model=ollama_settings.model,
+            prompt=prompt,
+            options={"temperature": temperature, "max_tokens": token_settings.max_tokens_outline * 3, "thinking": deepseek_settings.enable_thinking}
+        )
+        
+        outline = response["response"]
+        if not outline:
+            return "生成大纲失败，请重试"
+        
+        return outline
+    except Exception as e:
+        print(f"生成最终大纲时出错：{str(e)}")
+        return f"生成大纲失败：{str(e)}"
 
 # 从大纲中提取标题
 def extract_title(outline):
@@ -146,39 +193,13 @@ def extract_title(outline):
 # 生成章节的函数
 def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_threshold=3):
     # 确保novel_id是整数
-    print(f"novel_id type: {type(novel_id)}, value: {novel_id}")  # 调试信息
-    if isinstance(novel_id, list):
-        # 处理嵌套列表，如 [['2', '九霄天命']]
-        while isinstance(novel_id, list) and len(novel_id) > 0:
-            novel_id = novel_id[0]
-        # 现在novel_id应该是字符串 '2' 或 ['2', '九霄天命']
-        if isinstance(novel_id, list) and len(novel_id) > 0:
-            # 格式为 ['2', '九霄天命']
-            novel_id = novel_id[0]
-        if isinstance(novel_id, str):
-            # 尝试提取ID部分
-            try:
-                novel_id = int(novel_id)
-            except ValueError:
-                return "无效的小说ID"
-        else:
-            return "无效的小说ID"
-    elif isinstance(novel_id, str):
-        # 尝试从字符串中提取ID
-        try:
-            if ':' in novel_id:
-                novel_id = int(novel_id.split(':')[0].strip())
-            else:
-                novel_id = int(novel_id)
-        except ValueError:
-            return "无效的小说ID"
-    else:
-        try:
-            novel_id = int(novel_id)
-        except (ValueError, TypeError):
-            return "无效的小说ID"
+    print(f"处理小说选择值: {novel_id}")
+    
+    if not novel_id:
+        return "无效的小说ID"
     
     # 获取小说信息
+    print("正在获取小说信息...")
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
     cursor.execute(f"""
@@ -191,10 +212,13 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
         return "小说不存在"
     
     novel_title, outline, total_chapters = novel
+    print(f"小说标题：{novel_title}")
+    print(f"总章节数：{total_chapters}")
     
     # 获取上一章节内容
     previous_chapter = None
     if chapter_number > 1:
+        print("正在获取上一章节内容...")
         conn = sqlite3.connect(db_settings.db_path)
         cursor = conn.cursor()
         cursor.execute(f"""
@@ -204,8 +228,10 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
         conn.close()
         if previous:
             previous_chapter = previous[0]
+            print("已获取上一章节内容")
     
     # 获取小说的线索
+    print("正在获取小说线索...")
     clues = get_novel_clues(novel_id)
     active_clues = []
     for clue in clues:
@@ -213,6 +239,9 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
         # 如果线索应该在本章或之前出现，且尚未在本章之后安排出现
         if (next_chapter is None or next_chapter <= chapter_number):
             active_clues.append((clue_id, clue_text, clue_type, first_chapter))
+    
+    if active_clues:
+        print(f"找到 {len(active_clues)} 个活跃线索")
     
     # 构建系统提示
     system_prompt = f"你是一位专业的小说作家，擅长根据大纲和上一章节生成新的章节。请根据以下信息生成第{chapter_number}章。\n"
@@ -244,12 +273,14 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
     system_prompt += f"6. 禁止其他所有的输出，只输出章节内容"
     
     # 生成章节
+    print(f"正在生成第{chapter_number}章...")
     response = client.generate(
         model=ollama_settings.model,
         prompt=system_prompt,
-        options={"temperature": temperature, "max_tokens": word_count * token_settings.token_coefficient_chapter}  # 使用配置的token系数
+        options={"temperature": temperature, "max_tokens": word_count * token_settings.token_coefficient_chapter, "thinking": deepseek_settings.enable_thinking}  # 使用配置的token系数
     )
     
+    # 处理响应内容
     chapter_content = response["response"]
     
     # 提取章节标题
@@ -274,6 +305,7 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
     chapter_content = formatted_content
     
     # 检查章节编号是否已存在
+    print("正在检查章节编号...")
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
     cursor.execute(f"""
@@ -286,10 +318,13 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
         return f"章节 {chapter_number} 已经存在，请修改章节编号"
     
     # 保存章节
+    print("正在保存章节...")
     add_chapter(novel_id, chapter_number, chapter_title, chapter_content)
+    print("章节保存成功")
     
     # 更新线索的下次出现时间
-    if total_chapters:
+    if total_chapters and active_clues:
+        print("正在更新线索信息...")
         for clue_id, _, _, first_chapter in active_clues:
             # 预估下次线索出现的章节
             # 基于线索首次出现的章节和总章节数
@@ -301,6 +336,7 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
                 # 确保不超过总章节数
                 next_chapter_estimate = min(next_chapter_estimate, total_chapters)
                 update_clue_next_chapter(clue_id, next_chapter_estimate)
+        print("线索信息更新完成")
     
     # 添加线索分析结果到章节内容末尾
     if active_clues and total_chapters:
@@ -320,6 +356,7 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
             chapter_content += f"- {clue_type}：{clue_text} → 预计下次出现于第{next_chapter}章\n"
     
     # 返回章节内容和一个标志，表示生成成功
+    print("章节生成完成！")
     return chapter_content, True
 
 # 从章节内容中提取线索的函数
@@ -327,47 +364,58 @@ def extract_clues_from_chapter(chapter_content, chapter_number, novel_outline, t
     """
     使用AI从章节内容中提取线索，并根据大纲推测预计出现章节数
     """
-    system_prompt = f"你是一位专业的小说编辑，擅长从小说章节中识别和提取线索。请从以下章节内容中提取{clue_count}个重要的线索，包括明潮和暗涌两种类型。\n\n要求：\n1. 分析章节内容，识别出{clue_count}个重要的线索\n2. 为每条线索指定类型（明潮或暗涌）\n3. 基于小说大纲，推测每条线索的预计下次出现章节数\n4. 输出格式为：每条线索两行，第一行为「类型：线索内容」，第二行为「预计出现章节：X」\n5. 确保线索格式规范，内容简洁明了\n6. 只输出线索，不输出其他内容"
-    
-    response = client.generate(
-        model=ollama_settings.model,
-        prompt=f"{system_prompt}\n\n章节内容：{chapter_content}\n\n小说大纲：{novel_outline}",
-        options={"temperature": 0.5, "max_tokens": token_settings.max_tokens_clue_extraction}
-    )
-    
-    clues = []
-    lines = response["response"].split('\n')
-    i = 0
-    while i < len(lines) and len(clues) < clue_count:
-        line = lines[i].strip()
-        if line and '：' in line:
-            parts = line.split('：', 1)
-            if len(parts) == 2:
-                clue_type = parts[0].strip()
-                clue_text = parts[1].strip()
-                if clue_type in ["明潮", "暗涌"]:
-                    # 规范线索格式，确保内容简洁
-                    clue_text = clue_text.strip().rstrip('。')
-                    if clue_text:
-                        # 尝试获取预计出现章节数
-                        next_chapter = None
-                        if i + 1 < len(lines):
-                            next_line = lines[i + 1].strip()
-                            if next_line.startswith("预计出现章节："):
-                                try:
-                                    next_chapter_str = next_line.split("：")[1].strip()
-                                    next_chapter = int(next_chapter_str)
-                                    # 确保章节数在合理范围内
-                                    if next_chapter < chapter_number:
-                                        next_chapter = chapter_number + 1
-                                    if total_chapters and next_chapter > total_chapters:
-                                        next_chapter = total_chapters
-                                except (ValueError, IndexError):
-                                    # 如果解析失败，使用默认值
-                                    pass
-                        clues.append((clue_text, clue_type, chapter_number, next_chapter))
-                        i += 2  # 跳过下一行
-                        continue
-        i += 1
-    
-    return clues
+    try:
+        # 输入验证
+        if not chapter_content or not isinstance(chapter_content, str):
+            return []
+        
+        # 构建系统提示，使用文本格式而非JSON
+        system_prompt = f"你是一位专业的小说编辑，擅长从小说章节中识别和提取线索。请从以下章节内容中提取{clue_count}个重要的线索，包括明潮和暗涌两种类型。\n\n要求：\n1. 分析章节内容，识别出{clue_count}个重要的线索\n2. 为每条线索指定类型（明潮或暗涌）\n3. 基于小说大纲，推测每条线索的预计下次出现章节数\n4. 输出格式为：每条线索两行，第一行为「类型：线索内容」，第二行为「预计出现章节：X」\n5. 确保线索格式规范，内容简洁明了\n6. 只输出线索，不输出其他内容"
+        
+        # 调用AI生成线索
+        response = client.generate(
+            model=ollama_settings.model,
+            prompt=f"{system_prompt}\n\n章节内容：{chapter_content}\n\n小说大纲：{novel_outline}",
+            options={"temperature": 0.5, "max_tokens": token_settings.max_tokens_clue_extraction, "thinking": deepseek_settings.enable_thinking}
+        )
+        
+        # 处理响应
+        clues = []
+        lines = response["response"].split('\n')
+        i = 0
+        while i < len(lines) and len(clues) < clue_count:
+            line = lines[i].strip()
+            if line and '：' in line:
+                parts = line.split('：', 1)
+                if len(parts) == 2:
+                    clue_type = parts[0].strip()
+                    clue_text = parts[1].strip()
+                    if clue_type in ["明潮", "暗涌"]:
+                        # 规范线索格式，确保内容简洁
+                        clue_text = clue_text.strip().rstrip('。')
+                        if clue_text:
+                            # 尝试获取预计出现章节数
+                            next_chapter = None
+                            if i + 1 < len(lines):
+                                next_line = lines[i + 1].strip()
+                                if next_line.startswith("预计出现章节："):
+                                    try:
+                                        next_chapter_str = next_line.split("：")[1].strip()
+                                        next_chapter = int(next_chapter_str)
+                                        # 确保章节数在合理范围内
+                                        if next_chapter < chapter_number:
+                                            next_chapter = chapter_number + 1
+                                        if total_chapters and next_chapter > total_chapters:
+                                            next_chapter = total_chapters
+                                    except (ValueError, IndexError):
+                                        # 如果解析失败，使用默认值
+                                        pass
+                            clues.append((clue_text, clue_type, chapter_number, next_chapter))
+                            i += 2  # 跳过下一行
+                            continue
+            i += 1
+        
+        return clues
+    except Exception as e:
+        print(f"提取线索时出错：{str(e)}")
+        return []
