@@ -1,0 +1,9 @@
+models
+novel_settings
+test_data
+*.db
+**/__pycache__/**
+*.pyc
+/__pycache__
+.venv
+.gradio
