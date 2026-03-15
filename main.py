@@ -1,7 +1,7 @@
 import gradio as gr
 from settings import GradioSettings, DatabaseSettings, ChapterSettings, OutlineSettings, ClueSettings, OutlineGenerationSettings
 from database import init_db, add_novel, get_all_novels, get_novel_by_id, update_novel, delete_novel, get_novel_chapters, get_next_chapter_number, get_chapter_by_id, update_chapter, delete_chapter, add_clue, get_novel_clues, update_clue_next_chapter, delete_clue
-from generator import generate_outline, extract_title, generate_chapter, extract_clues_from_chapter
+from generator import generate_outline, generate_outline_streaming, extract_title, generate_chapter, generate_chapter_streaming, extract_clues_from_chapter
 
 # 加载设置
 gradio_settings = GradioSettings()
@@ -78,271 +78,357 @@ def batch_generate_chapters(novel_id, start_chapter, batch_count, word_count, te
     else:
         return "未生成任何章节"
 
-# 创建Gradio界面
-with gr.Blocks(title=gradio_settings.title) as demo:
-    gr.Markdown(f"# {gradio_settings.title}")
+# 创建 Gradio 界面
+with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo:
+    # 页面标题和描述
+    gr.Markdown(f"# 📚 {gradio_settings.title}")
     gr.Markdown(gradio_settings.description)
+    
+    # 状态管理，用于存储生成的大纲（纯净版本）
+    generated_outline_state = gr.State("")
     
     # 添加标签页
     with gr.Tabs():
-        # 生成大纲标签页
-        with gr.Tab("生成大纲"):
+        # ========== 生成大纲标签页 ==========
+        with gr.Tab("📝 生成大纲", id=1):
+            # 参数说明区域
+            with gr.Accordion("📖 参数说明和使用建议", open=False):
+                gr.Markdown("""
+                #### 参数说明
+                - **提示词**：小说的核心创意和故事梗概
+                - **预计章节数**：整部小说的总章节数量
+                - **每章字数**：每章的预期字数
+                - **章节间隔**：每隔多少章为一个事件单元（例如：设置为 5 表示每 5 章为一个事件）
+                - **拆分次数**：将大纲生成拆分为多少次完成（例如：100 章拆分 5 次，每次生成约 20 章）
+                - **温度**：控制生成的随机性（0.1 最保守，1.0 最发散）
+                
+                #### 使用建议
+                | 小说类型 | 章节数范围 | 拆分次数 | 章节间隔 |
+                |---------|-----------|---------|---------|
+                | 短篇 | <50 章 | 1-2 次 | 2-3 章 |
+                | 中长篇 | 50-200 章 | 3-5 次 | 5-10 章 |
+                | 超长篇 | >200 章 | 5-10 次 | 10-20 章 |
+                
+                #### 流式输出特性
+                - ✅ 生成过程实时显示进度，包括基础骨架和各段大纲
+                - ✅ 每完成一段大纲会立即显示，无需等待全部完成
+                - ✅ 可以随时观察生成进度和内容质量
+                - ✅ 章节生成支持流式输出，实时显示生成进度和完整内容
+                - ✅ 自动保存生成的章节到数据库
+                - ✅ 显示线索分析和下次出现章节预测
+                """)
+            
+            # 参数输入区域
             with gr.Row():
-                with gr.Column():
+                with gr.Column(scale=1):
+                    gr.Markdown("### ⚙️ 参数设置")
                     prompt_input = gr.Textbox(
-                        label="输入提示词",
-                        placeholder="例如：一个关于人工智能与人类情感的科幻故事",
-                        lines=3
+                        label="📌 提示词",
+                        placeholder="例如：一个关于人工智能与人类情感的科幻故事，讲述 AI 逐渐产生自我意识的过程...",
+                        lines=4
                     )
-                    chapter_count = gr.Number(
-                        label="预计章节数",
-                        value=outline_settings.default_chapter_count,
-                        minimum=outline_settings.min_chapter_count,
-                        maximum=outline_settings.max_chapter_count,
-                        step=1
-                    )
-                    chapter_word_count = gr.Number(
-                        label="每章字数",
-                        value=outline_settings.default_chapter_word_count,
-                        minimum=outline_settings.min_chapter_word_count,
-                        maximum=outline_settings.max_chapter_word_count,
-                        step=100
-                    )
-                    chapter_interval = gr.Number(
-                        label="章节间隔",
-                        value=outline_settings.default_chapter_interval,
-                        minimum=outline_settings.min_chapter_interval,
-                        maximum=outline_settings.max_chapter_interval,
-                        step=1
-                    )
-                    recursion_depth = gr.Number(
-                        label="递归深度",
-                        value=outline_gen_settings.default_recursion_depth,
-                        minimum=outline_gen_settings.min_recursion_depth,
-                        maximum=outline_gen_settings.max_recursion_depth,
-                        step=1
-                    )
+                    
+                    with gr.Row():
+                        chapter_count = gr.Number(
+                            label="📊 预计章节数",
+                            value=outline_settings.default_chapter_count,
+                            minimum=outline_settings.min_chapter_count,
+                            maximum=outline_settings.max_chapter_count,
+                            step=1
+                        )
+                        chapter_word_count = gr.Number(
+                            label="✍️ 每章字数",
+                            value=outline_settings.default_chapter_word_count,
+                            minimum=outline_settings.min_chapter_word_count,
+                            maximum=outline_settings.max_chapter_word_count,
+                            step=100
+                        )
+                    
+                    with gr.Row():
+                        chapter_interval = gr.Number(
+                            label="🔗 章节间隔",
+                            value=outline_settings.default_chapter_interval,
+                            minimum=outline_settings.min_chapter_interval,
+                            maximum=outline_settings.max_chapter_interval,
+                            step=1
+                        )
+                        split_count = gr.Number(
+                            label="🔪 拆分次数",
+                            value=outline_gen_settings.default_split_count,
+                            minimum=outline_gen_settings.min_split_count,
+                            maximum=outline_gen_settings.max_split_count,
+                            step=1
+                        )
+                    
                     temperature = gr.Slider(
-                        label="温度",
+                        label="🎲 温度参数",
                         minimum=0.1,
                         maximum=1.0,
                         value=0.7,
-                        step=0.1
+                        step=0.1,
+                        interactive=True,
+                        info="较低值（0.1-0.5）更保守，较高值（0.7-1.0）更有创意"
                     )
-                    generate_btn = gr.Button("生成大纲")
+                    
+                    generate_btn = gr.Button("🚀 生成大纲", variant="primary", size="lg")
                 
-                with gr.Column():
+                with gr.Column(scale=1):
+                    gr.Markdown("### 📋 生成结果")
                     outline_output = gr.Textbox(
                         label="小说大纲",
-                        lines=20
+                        lines=25,
+                        placeholder="大纲内容将在这里实时显示..."
                     )
             
-            # 保存到数据库
-            save_btn = gr.Button("保存到数据库")
-            save_status = gr.Textbox(label="保存状态", interactive=False)
+            # 保存操作区域
+            with gr.Row():
+                save_btn = gr.Button("💾 保存到数据库", variant="primary", size="lg")
+                save_status = gr.Textbox(label="保存状态", interactive=False, show_label=True)
         
-        # 管理小说标签页
-        with gr.Tab("管理小说"):
+        # ========== 管理小说标签页 ==========
+        with gr.Tab("📚 管理小说", id=2):
+            gr.Markdown("### 📖 小说列表")
             # 小说列表
             novel_list = gr.Dataframe(
                 label="小说列表",
                 headers=["ID", "标题", "提示词", "创建时间"],
                 datatype=["number", "str", "str", "str"],
-                interactive=False
+                interactive=False,
+                wrap=True
             )
             
             # 刷新列表按钮
-            refresh_btn = gr.Button("刷新列表")
+            refresh_btn = gr.Button("🔄 刷新列表", variant="secondary")
             
+            gr.Markdown("### 📝 小说详情")
             # 小说详情
             with gr.Row():
-                with gr.Column():
-                    novel_id = gr.Number(label="小说ID", interactive=False)
-                    novel_title = gr.Textbox(label="小说标题")
-                    novel_prompt = gr.Textbox(label="提示词", lines=3)
-                    novel_outline = gr.Textbox(label="小说大纲", lines=10)
+                with gr.Column(scale=2):
+                    novel_id = gr.Number(label="🆔 小说 ID", interactive=False)
+                    novel_title = gr.Textbox(label="📚 小说标题")
+                    novel_prompt = gr.Textbox(label="💡 提示词", lines=3)
+                    novel_outline = gr.Textbox(label="📋 小说大纲", lines=10)
                 
-                with gr.Column():
-                    load_btn = gr.Button("加载小说")
-                    update_btn = gr.Button("更新小说")
-                    delete_btn = gr.Button("删除小说")
+                with gr.Column(scale=1):
+                    load_btn = gr.Button("📥 加载小说", variant="secondary")
+                    update_btn = gr.Button("✏️ 更新小说", variant="primary")
+                    delete_btn = gr.Button("🗑️ 删除小说", variant="stop")
                     action_status = gr.Textbox(label="操作状态", interactive=False)
         
-        # 章节管理标签页
-        with gr.Tab("章节管理"):
-            # 选择小说（与管理小说一致）
+        # ========== 章节管理标签页 ==========
+        with gr.Tab("📖 章节管理", id=3):
+            # 选择小说区域
+            gr.Markdown("### 📚 选择小说")
             novel_list_chapter = gr.Dataframe(
                 label="小说列表",
                 headers=["ID", "标题", "提示词", "创建时间"],
                 datatype=["number", "str", "str", "str"],
-                interactive=False
+                interactive=False,
+                wrap=True
             )
-            refresh_novels_btn = gr.Button("刷新小说列表")
-            # 显示当前选择的小说ID
-            selected_novel_id = gr.Number(label="当前选择的小说ID", interactive=False)
+            refresh_novels_btn = gr.Button("🔄 刷新小说列表", variant="secondary")
+            selected_novel_id = gr.Number(label="📌 当前选择的小说 ID", interactive=False)
             
-            # 生成章节部分
+            # 生成章节区域
+            gr.Markdown("### ✍️ 生成章节")
             with gr.Row():
-                with gr.Column():
-                    chapter_number = gr.Number(
-                        label="章节编号",
-                        value=1,
-                        minimum=1,
-                        step=1
-                    )
-                    word_count = gr.Slider(
-                        label="字数",
-                        minimum=500,
-                        maximum=chapter_settings.max_word_count,
-                        value=chapter_settings.default_word_count,
-                        step=100
-                    )
-                    temperature = gr.Slider(
-                        label="温度",
-                        minimum=chapter_settings.min_temperature,
-                        maximum=chapter_settings.max_temperature,
-                        value=chapter_settings.default_temperature,
-                        step=0.1
-                    )
-                    clue_threshold = gr.Number(
-                        label="线索阈值",
-                        value=clue_settings.default_clue_threshold,
-                        minimum=clue_settings.min_clue_threshold,
-                        maximum=clue_settings.max_clue_threshold,
-                        step=1
-                    )
-                    generate_chapter_btn = gr.Button("生成章节")
-                    # 批量编写控件
-                    batch_chapter_count = gr.Number(
-                        label="批量编写章节数",
-                        value=1,
-                        minimum=1,
-                        step=1
-                    )
-                    auto_add_clue = gr.Checkbox(
-                        label="自动添加线索",
-                        value=False
-                    )
-                    clue_count = gr.Number(
-                        label="每章线索数量",
-                        value=2,
-                        minimum=1,
-                        maximum=10,
-                        step=1
-                    )
-                    batch_generate_btn = gr.Button("批量生成章节")
+                with gr.Column(scale=1):
+                    with gr.Group():
+                        gr.Markdown("**📝 章节设置**")
+                        chapter_number = gr.Number(
+                            label="🔢 章节编号",
+                            value=1,
+                            minimum=1,
+                            step=1
+                        )
+                        word_count = gr.Slider(
+                            label="📏 字数",
+                            minimum=500,
+                            maximum=chapter_settings.max_word_count,
+                            value=chapter_settings.default_word_count,
+                            step=100
+                        )
+                        temperature = gr.Slider(
+                            label="🎲 温度",
+                            minimum=chapter_settings.min_temperature,
+                            maximum=chapter_settings.max_temperature,
+                            value=chapter_settings.default_temperature,
+                            step=0.1,
+                            interactive=True
+                        )
+                        clue_threshold = gr.Number(
+                            label="⚠️ 线索阈值",
+                            value=clue_settings.default_clue_threshold,
+                            minimum=clue_settings.min_clue_threshold,
+                            maximum=clue_settings.max_clue_threshold,
+                            step=1,
+                            info="接近结尾时收束线索的章节数阈值"
+                        )
+                    
+                    with gr.Group():
+                        gr.Markdown("**⚡ 批量生成**")
+                        batch_chapter_count = gr.Number(
+                            label="📦 批量编写章节数",
+                            value=1,
+                            minimum=1,
+                            step=1
+                        )
+                        auto_add_clue = gr.Checkbox(
+                            label="✅ 自动添加线索",
+                            value=False
+                        )
+                        clue_count = gr.Number(
+                            label="🎯 每章线索数量",
+                            value=2,
+                            minimum=1,
+                            maximum=10,
+                            step=1
+                        )
+                    
+                    with gr.Row():
+                        generate_chapter_btn = gr.Button("🚀 生成章节", variant="primary", size="lg")
+                        batch_generate_btn = gr.Button("📦 批量生成", variant="secondary", size="lg")
                 
-                with gr.Column():
+                with gr.Column(scale=2):
                     chapter_content = gr.Textbox(
-                        label="章节内容",
-                        lines=20
+                        label="📄 章节内容",
+                        lines=25,
+                        placeholder="生成的章节内容将在这里实时显示..."
                     )
                     chapter_status = gr.Textbox(label="生成状态", interactive=False)
                     show_clue_dialog = gr.State(False)  # 用于控制线索对话框的显示
                     batch_status = gr.Textbox(label="批量生成状态", interactive=False)
             
-            # 章节列表
+            # 章节列表区域
+            gr.Markdown("### 📋 章节列表")
             chapter_list = gr.Dataframe(
                 label="章节列表",
                 headers=["ID", "章节编号", "章节标题", "创建时间"],
                 datatype=["number", "number", "str", "str"],
                 interactive=False,
-                row_count="dynamic"
+                row_count="dynamic",
+                wrap=True
             )
-            refresh_chapters_btn = gr.Button("刷新章节列表")
+            refresh_chapters_btn = gr.Button("🔄 刷新章节列表", variant="secondary")
             
-            # 章节详情
+            # 章节详情区域
+            gr.Markdown("### 📝 章节详情")
             with gr.Row():
-                with gr.Column():
-                    chapter_id = gr.Number(label="章节ID", interactive=False)
-                    chapter_num = gr.Number(label="章节编号", minimum=1, step=1)
-                    chapter_title = gr.Textbox(label="章节标题")
-                    chapter_text = gr.Textbox(label="章节内容", lines=10)
+                with gr.Column(scale=2):
+                    chapter_id = gr.Number(label="🆔 章节 ID", interactive=False)
+                    chapter_num = gr.Number(label="🔢 章节编号", minimum=1, step=1)
+                    chapter_title = gr.Textbox(label="📚 章节标题")
+                    chapter_text = gr.Textbox(label="📄 章节内容", lines=10)
                 
-                with gr.Column():
-                    load_chapter_btn = gr.Button("加载章节")
-                    update_chapter_btn = gr.Button("更新章节")
-                    delete_chapter_btn = gr.Button("删除章节")
+                with gr.Column(scale=1):
+                    load_chapter_btn = gr.Button("📥 加载章节", variant="secondary")
+                    update_chapter_btn = gr.Button("✏️ 更新章节", variant="primary")
+                    delete_chapter_btn = gr.Button("🗑️ 删除章节", variant="stop")
                     chapter_action_status = gr.Textbox(label="操作状态", interactive=False)
             
-            # 线索管理部分
-            gr.Markdown("## 线索管理")
-            with gr.Row():
-                with gr.Column():
-                    clue_text = gr.Textbox(label="线索内容", lines=3)
-                    clue_type = gr.Radio(
-                        label="线索类型",
-                        choices=["明潮", "暗涌"],
-                        value="明潮"
-                    )
-                    clue_chapter = gr.Number(
-                        label="首次出现章节",
-                        value=1,
-                        minimum=1,
-                        step=1
-                    )
-                    add_clue_btn = gr.Button("添加线索")
-                    clue_status = gr.Textbox(label="线索操作状态", interactive=False)
+            # 线索管理区域
+            with gr.Accordion("🔍 线索管理", open=False):
+                gr.Markdown("管理小说中的明潮和暗涌线索，追踪线索的出现和收束")
                 
-                with gr.Column():
-                    clue_list = gr.Dataframe(
-                        label="线索列表",
-                        headers=["ID", "线索内容", "线索类型", "首次出现章节", "下次出现章节"],
-                        datatype=["number", "str", "str", "number", "number"],
-                        interactive=False
-                    )
-                    refresh_clues_btn = gr.Button("刷新线索列表")
-            
-            # 线索详情
-            with gr.Row():
-                with gr.Column():
-                    clue_id = gr.Number(label="线索ID", interactive=False)
-                    clue_text_edit = gr.Textbox(label="线索内容", lines=3)
-                    clue_type_edit = gr.Radio(
-                        label="线索类型",
-                        choices=["明潮", "暗涌"],
-                        value="明潮"
-                    )
-                    clue_chapter_edit = gr.Number(
-                        label="首次出现章节",
-                        value=1,
-                        minimum=1,
-                        step=1
-                    )
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("**➕ 添加新线索**")
+                        clue_text = gr.Textbox(label="📝 线索内容", lines=3, placeholder="描述线索的具体内容...")
+                        clue_type = gr.Radio(
+                            label="🏷️ 线索类型",
+                            choices=["明潮", "暗涌"],
+                            value="明潮",
+                            info="明潮：明显的情节线索；暗涌：隐藏的伏笔线索"
+                        )
+                        clue_chapter = gr.Number(
+                            label="📍 首次出现章节",
+                            value=1,
+                            minimum=1,
+                            step=1
+                        )
+                        add_clue_btn = gr.Button("➕ 添加线索", variant="primary")
+                        clue_status = gr.Textbox(label="操作状态", interactive=False)
+                    
+                    with gr.Column(scale=2):
+                        gr.Markdown("**📋 线索列表**")
+                        clue_list = gr.Dataframe(
+                            label="线索列表",
+                            headers=["ID", "线索内容", "线索类型", "首次出现章节", "下次出现章节"],
+                            datatype=["number", "str", "str", "number", "number"],
+                            interactive=False,
+                            wrap=True
+                        )
+                        refresh_clues_btn = gr.Button("🔄 刷新线索列表", variant="secondary")
                 
-                with gr.Column():
-                    load_clue_btn = gr.Button("加载线索")
-                    update_clue_btn = gr.Button("更新线索")
-                    delete_clue_btn = gr.Button("删除线索")
-                    clue_action_status = gr.Textbox(label="线索操作状态", interactive=False)
+                gr.Markdown("**✏️ 编辑线索**")
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        clue_id = gr.Number(label="🆔 线索 ID", interactive=False)
+                        clue_text_edit = gr.Textbox(label="📝 线索内容", lines=3)
+                        clue_type_edit = gr.Radio(
+                            label="🏷️ 线索类型",
+                            choices=["明潮", "暗涌"],
+                            value="明潮"
+                        )
+                        clue_chapter_edit = gr.Number(
+                            label="📍 首次出现章节",
+                            value=1,
+                            minimum=1,
+                            step=1
+                        )
+                    
+                    with gr.Column(scale=1):
+                        load_clue_btn = gr.Button("📥 加载线索", variant="secondary")
+                        update_clue_btn = gr.Button("✏️ 更新线索", variant="primary")
+                        delete_clue_btn = gr.Button("🗑️ 删除线索", variant="stop")
+                        clue_action_status = gr.Textbox(label="操作状态", interactive=False)
             
             # 生成章节后询问是否添加线索的对话框
             with gr.Blocks(visible=False) as clue_dialog:
-                gr.Markdown("章节生成成功！是否要为该章节添加线索？")
+                gr.Markdown("✅ **章节生成成功！** 是否要为该章节添加线索？")
                 with gr.Row():
-                    yes_btn = gr.Button("是")
-                    no_btn = gr.Button("否")
+                    yes_btn = gr.Button("✅ 是", variant="primary")
+                    no_btn = gr.Button("❌ 否", variant="secondary")
     
-    # 绑定生成函数
+    # 绑定生成函数（流式输出）
+    def generate_and_store(prompt, chapter_count, chapter_word_count, chapter_interval, split_count, temperature):
+        # 使用流式生成函数，但收集最终结果用于保存
+        full_outline = ""
+        for output in generate_outline_streaming(prompt, chapter_count, chapter_word_count, chapter_interval, split_count, temperature):
+            full_outline = output  # 保留最新的完整输出
+            # 每次 yield 都返回两个值：完整输出（显示）和当前纯净大纲（存储）
+            if "=== 完整大纲 ===" in full_outline:
+                clean_outline = full_outline.split("=== 完整大纲 ===")[1].strip()
+            else:
+                clean_outline = ""
+            yield output, clean_outline
+        
+        # 最终返回完整的大纲内容用于状态存储
+        if "=== 完整大纲 ===" in full_outline:
+            clean_outline = full_outline.split("=== 完整大纲 ===")[1].strip()
+        else:
+            clean_outline = full_outline
+        yield full_outline, clean_outline
+    
     generate_btn.click(
-        fn=generate_outline,
-        inputs=[prompt_input, chapter_count, chapter_word_count, chapter_interval, recursion_depth, temperature],
-        outputs=outline_output,
+        fn=generate_and_store,
+        inputs=[prompt_input, chapter_count, chapter_word_count, chapter_interval, split_count, temperature],
+        outputs=[outline_output, generated_outline_state],
         api_name="generate_outline"
     )
     
     # 绑定保存函数
-    def save_novel_to_db(outline):
-        if not outline:
+    def save_novel_to_db(clean_outline):
+        if not clean_outline:
             return "大纲不能为空"
-        title = extract_title(outline)
+        title = extract_title(clean_outline)
         # 确保提示词不为空
         prompt = prompt_input.value if prompt_input.value else f"{title}的小说"
-        return add_novel(title, prompt, outline)
+        return add_novel(title, prompt, clean_outline)
     
     save_btn.click(
         fn=save_novel_to_db,
-        inputs=outline_output,
+        inputs=generated_outline_state,
         outputs=save_status
     )
     
@@ -456,9 +542,20 @@ with gr.Blocks(title=gradio_settings.title) as demo:
         outputs=chapter_number
     )
     
-    # 生成章节
+    # 生成章节（流式输出）
+    def generate_chapter_wrapper(novel_id, chapter_num, word_count, temperature, clue_threshold):
+        # 使用流式生成函数
+        for output in generate_chapter_streaming(novel_id, chapter_num, word_count, temperature, clue_threshold):
+            # 检查是否是最终的成功标记
+            if isinstance(output, tuple) and len(output) == 2:
+                # 返回最终内容和成功标志
+                yield output[0], True
+            else:
+                # 返回进度文本
+                yield output, False
+    
     generate_chapter_btn.click(
-        fn=generate_chapter,
+        fn=generate_chapter_wrapper,
         inputs=[selected_novel_id, chapter_number, word_count, temperature, clue_threshold],
         outputs=[chapter_content, show_clue_dialog],
         api_name="generate_chapter"

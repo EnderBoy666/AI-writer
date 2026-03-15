@@ -10,7 +10,7 @@ class OllamaSettings:
 class GradioSettings:
     def __init__(self):
         # 界面标题
-        self.title = "长篇小说器"
+        self.title = "长篇小说生成器"
         # 界面描述
         self.description = "输入提示词，生成小说"
         # 界面主题
@@ -84,7 +84,7 @@ class TokenSettings:
         # 章节生成的token系数（每字对应的token数）
         self.token_coefficient_chapter = 2
         # 线索提取的最大token数
-        self.max_tokens_clue_extraction = 1000
+        self.max_tokens_clue_extraction = 1500
 
 # DeepSeek模型设置
 class DeepSeekSettings:
@@ -94,16 +94,16 @@ class DeepSeekSettings:
         # 思考模式的温度值
         self.thinking_temperature = 0.7
         # 思考模式的最大token数
-        self.max_tokens_thinking = 1000
+        self.max_tokens_thinking = 2000
 
 # 大纲生成设置
 class OutlineGenerationSettings:
     def __init__(self):
-        # 默认递归深度
-        self.default_recursion_depth = 2
-        # 最小递归深度
-        self.min_recursion_depth = 1
-        # 最大递归深度
-        self.max_recursion_depth = 3
-        # 骨架章节数（第一级递归）
+        # 默认拆分次数
+        self.default_split_count = 1
+        # 最小拆分次数
+        self.min_split_count = 1
+        # 最大拆分次数
+        self.max_split_count = 10
+        # 骨架章节数（用于初始大纲生成）
         self.skeleton_chapter_count = 5
