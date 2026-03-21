@@ -1,7 +1,7 @@
 import gradio as gr
 from settings import GradioSettings, DatabaseSettings, ChapterSettings, OutlineSettings, ClueSettings, OutlineGenerationSettings
-from database import init_db, add_novel, get_all_novels, get_novel_by_id, update_novel, delete_novel, get_novel_chapters, get_next_chapter_number, get_chapter_by_id, update_chapter, delete_chapter, add_clue, get_novel_clues, update_clue_next_chapter, delete_clue
-from generator import generate_outline, generate_outline_streaming, extract_title, generate_chapter, generate_chapter_streaming, extract_clues_from_chapter
+from database import init_db, add_novel, get_all_novels, get_novel_by_id, update_novel, delete_novel, get_novel_chapters, get_next_chapter_number, get_chapter_by_id, update_chapter, delete_chapter, add_clue, get_novel_clues, update_clue_next_chapter, delete_clue, add_chapter_outline, get_novel_chapter_outlines, get_chapter_outline_by_id, update_chapter_outline, delete_chapter_outline, get_chapter_outline
+from generator import generate_outline, generate_outline_streaming, extract_title, generate_chapter, generate_chapter_streaming, extract_clues_from_chapter, parse_chapter_outlines
 
 # 加载设置
 gradio_settings = GradioSettings()
@@ -15,12 +15,14 @@ outline_gen_settings = OutlineGenerationSettings()
 init_db()
 
 # 批量生成章节的函数
-def batch_generate_chapters(novel_id, start_chapter, batch_count, word_count, temperature, clue_threshold, auto_add_clue, clue_count=2):
-    # 确保novel_id是整数
-    print(f"处理小说选择值: {novel_id}")
+def batch_generate_chapters(novel_id, start_chapter, batch_count, word_count, temperature, clue_threshold, auto_add_clue, error_handling="❌ 停止生成", clue_count=2):
+    # 确保 novel_id 是整数
+    print(f"处理小说选择值：{novel_id}")
+    print(f"错误处理方式：{error_handling}")
+    print(f"批量生成参数：起始章节={start_chapter}, 数量={batch_count}")
     
     if not novel_id:
-        return "无效的小说ID"
+        return "无效的小说 ID"
     
     # 获取小说信息（大纲和总章节数）
     print("正在获取小说信息...")
@@ -39,11 +41,28 @@ def batch_generate_chapters(novel_id, start_chapter, batch_count, word_count, te
     novel_outline, total_chapters = novel_info
     print(f"小说总章节数：{total_chapters}")
     
+    # 获取章节大纲
+    print("正在获取章节大纲...")
+    chapter_outlines_map = {}
+    for i in range(start_chapter, start_chapter + batch_count):
+        outline_data = get_chapter_outline(novel_id, i)
+        if outline_data:
+            chapter_outlines_map[i] = {
+                'title': outline_data[0],
+                'outline': outline_data[1]
+            }
+            print(f"第{i}章大纲已加载：{outline_data[0]}")
+    
     # 批量生成章节
     generated_chapters = []
+    failed_chapters = []
+    skipped_chapters = []
+    retry_attempts = 3  # 重试次数
+    
     for i in range(batch_count):
         current_chapter = start_chapter + i
         print(f"\n开始生成第{current_chapter}章...")
+        
         # 检查章节编号是否已存在
         conn = sqlite3.connect(db_settings.db_path)
         cursor = conn.cursor()
@@ -54,27 +73,110 @@ def batch_generate_chapters(novel_id, start_chapter, batch_count, word_count, te
         conn.close()
         
         if existing_chapter:
-            return f"章节 {current_chapter} 已经存在，请修改起始章节编号"
+            if error_handling == "⏭️ 跳过错误章节":
+                print(f"章节 {current_chapter} 已存在，跳过...")
+                skipped_chapters.append(current_chapter)
+                continue
+            else:
+                return f"章节 {current_chapter} 已经存在，请修改起始章节编号"
         
         # 生成章节
-        result = generate_chapter(novel_id, current_chapter, word_count, temperature, clue_threshold)
-        if isinstance(result, tuple):
-            chapter_content, _ = result
-            generated_chapters.append(f"第{current_chapter}章")
+        success = False
+        chapter_content = ""
+        
+        for attempt in range(retry_attempts):
+            print(f"第{attempt + 1}次尝试生成第{current_chapter}章...")
+            result = generate_chapter(novel_id, current_chapter, word_count, temperature, clue_threshold)
             
-            # 自动添加线索
-            if auto_add_clue:
-                print(f"正在为第{current_chapter}章添加线索...")
-                extracted_clues = extract_clues_from_chapter(chapter_content, current_chapter, novel_outline, total_chapters, clue_count)
-                for clue_text, clue_type, first_chapter, next_chapter in extracted_clues:
-                    add_clue(novel_id, clue_text, clue_type, first_chapter, next_chapter)
-                print("线索添加完成")
+            if isinstance(result, tuple):
+                chapter_content, _ = result
+                # 验证章节内容是否有效
+                if chapter_content and len(chapter_content.strip()) > 50:
+                    success = True
+                    break
+                else:
+                    print(f"第{attempt + 1}次生成的内容无效，内容长度：{len(chapter_content.strip())}")
+            else:
+                print(f"第{attempt + 1}次生成失败: {result}")
+            
+            if attempt < retry_attempts - 1:
+                print(f"等待重试...")
+                import time
+                time.sleep(1)  # 等待1秒后重试
+        
+        if success:
+            # 保存章节到数据库
+            try:
+                conn = sqlite3.connect(db_settings.db_path)
+                cursor = conn.cursor()
+                cursor.execute(f"""
+                INSERT INTO {db_settings.chapter_table} (novel_id, chapter_number, content, created_at)
+                VALUES (?, ?, ?, datetime('now'))
+                """, (novel_id, current_chapter, chapter_content))
+                conn.commit()
+                conn.close()
+                
+                generated_chapters.append(current_chapter)
+                print(f"第{current_chapter}章生成并保存成功")
+                
+                # 自动添加线索
+                if auto_add_clue:
+                    print(f"正在为第{current_chapter}章添加线索...")
+                    extracted_clues = extract_clues_from_chapter(chapter_content, current_chapter, novel_outline, total_chapters, clue_count)
+                    for clue_text, clue_type, first_chapter, next_chapter in extracted_clues:
+                        add_clue(novel_id, clue_text, clue_type, first_chapter, next_chapter)
+                    print("线索添加完成")
+                    
+            except Exception as e:
+                print(f"保存第{current_chapter}章到数据库失败: {e}")
+                if error_handling == "⏭️ 跳过错误章节":
+                    skipped_chapters.append(current_chapter)
+                elif error_handling == "❌ 停止生成":
+                    return f"保存第{current_chapter}章失败: {e}"
+                
         else:
-            return f"生成第{current_chapter}章失败: {result}"
+            print(f"第{current_chapter}章生成失败")
+            failed_chapters.append(current_chapter)
+            
+            # 根据错误处理方式决定下一步
+            if error_handling == "❌ 停止生成":
+                return f"生成第{current_chapter}章失败，已停止批量生成"
+            elif error_handling == "💾 保存上一章内容":
+                # 尝试获取上一章内容并保存
+                if i > 0 and generated_chapters:
+                    previous_chapter = generated_chapters[-1]
+                    try:
+                        conn = sqlite3.connect(db_settings.db_path)
+                        cursor = conn.cursor()
+                        cursor.execute(f"""
+                        SELECT content FROM {db_settings.chapter_table} WHERE novel_id = ? AND chapter_number = ?
+                        """, (novel_id, previous_chapter))
+                        previous_content = cursor.fetchone()
+                        
+                        if previous_content:
+                            cursor.execute(f"""
+                            INSERT INTO {db_settings.chapter_table} (novel_id, chapter_number, content, created_at)
+                            VALUES (?, ?, ?, datetime('now'))
+                            """, (novel_id, current_chapter, previous_content[0]))
+                            conn.commit()
+                            print(f"第{current_chapter}章保存为上一章内容")
+                            generated_chapters.append(current_chapter)
+                        
+                        conn.close()
+                    except Exception as e:
+                        print(f"保存上一章内容失败: {e}")
     
     # 构建返回信息
+    result_parts = []
     if generated_chapters:
-        return f"成功生成章节: {', '.join(generated_chapters)}"
+        result_parts.append(f"成功生成章节: {', '.join([f'第{ch}章' for ch in generated_chapters])}")
+    if failed_chapters:
+        result_parts.append(f"失败章节: {', '.join([f'第{ch}章' for ch in failed_chapters])}")
+    if skipped_chapters:
+        result_parts.append(f"跳过章节: {', '.join([f'第{ch}章' for ch in skipped_chapters])}")
+    
+    if result_parts:
+        return "\n".join(result_parts)
     else:
         return "未生成任何章节"
 
@@ -189,12 +291,11 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
         with gr.Tab("📚 管理小说", id=2):
             gr.Markdown("### 📖 小说列表")
             # 小说列表
-            novel_list = gr.Dataframe(
-                label="小说列表",
-                headers=["ID", "标题", "提示词", "创建时间"],
-                datatype=["number", "str", "str", "str"],
-                interactive=False,
-                wrap=True
+            novel_list_dropdown = gr.Dropdown(
+                label="📖 选择小说",
+                choices=[],
+                interactive=True,
+                info="从下拉列表中选择要管理的小说"
             )
             
             # 刷新列表按钮
@@ -210,7 +311,6 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
                     novel_outline = gr.Textbox(label="📋 小说大纲", lines=10)
                 
                 with gr.Column(scale=1):
-                    load_btn = gr.Button("📥 加载小说", variant="secondary")
                     update_btn = gr.Button("✏️ 更新小说", variant="primary")
                     delete_btn = gr.Button("🗑️ 删除小说", variant="stop")
                     action_status = gr.Textbox(label="操作状态", interactive=False)
@@ -219,15 +319,45 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
         with gr.Tab("📖 章节管理", id=3):
             # 选择小说区域
             gr.Markdown("### 📚 选择小说")
-            novel_list_chapter = gr.Dataframe(
-                label="小说列表",
-                headers=["ID", "标题", "提示词", "创建时间"],
-                datatype=["number", "str", "str", "str"],
-                interactive=False,
-                wrap=True
-            )
-            refresh_novels_btn = gr.Button("🔄 刷新小说列表", variant="secondary")
+            with gr.Row():
+                with gr.Column(scale=3):
+                    novel_list_dropdown_chapter = gr.Dropdown(
+                        label="📖 选择小说",
+                        choices=[],
+                        interactive=True,
+                        info="从下拉列表中选择要管理章节的小说"
+                    )
+                with gr.Column(scale=1):
+                    refresh_novels_btn = gr.Button("🔄 刷新小说列表", variant="secondary")
             selected_novel_id = gr.Number(label="📌 当前选择的小说 ID", interactive=False)
+            
+            # 章节大纲管理区域
+            with gr.Accordion("📋 章节大纲管理", open=False):
+                gr.Markdown("查看和管理各章节的大纲内容")
+                
+                with gr.Row():
+                    with gr.Column(scale=3):
+                        chapter_outline_list_dropdown = gr.Dropdown(
+                            label="📖 选择章节大纲",
+                            choices=[],
+                            interactive=True,
+                            info="从下拉列表中选择要查看的章节大纲"
+                        )
+                    with gr.Column(scale=1):
+                        refresh_outlines_btn = gr.Button("🔄 刷新大纲列表", variant="secondary")
+                
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        outline_id = gr.Number(label="🆔 大纲 ID", interactive=False)
+                        outline_chapter_num = gr.Number(label="🔢 章节编号", minimum=1, step=1)
+                        outline_chapter_title = gr.Textbox(label="📚 章节标题")
+                        outline_text = gr.Textbox(label="📄 大纲内容", lines=10)
+                    
+                    with gr.Column(scale=1):
+                        load_outline_btn = gr.Button("📥 加载大纲", variant="secondary")
+                        update_outline_btn = gr.Button("✏️ 更新大纲", variant="primary")
+                        delete_outline_btn = gr.Button("🗑️ 删除大纲", variant="stop")
+                        outline_action_status = gr.Textbox(label="操作状态", interactive=False)
             
             # 生成章节区域
             gr.Markdown("### ✍️ 生成章节")
@@ -267,26 +397,36 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
                     
                     with gr.Group():
                         gr.Markdown("**⚡ 批量生成**")
-                        batch_chapter_count = gr.Number(
-                            label="📦 批量编写章节数",
-                            value=1,
-                            minimum=1,
-                            step=1
-                        )
-                        auto_add_clue = gr.Checkbox(
-                            label="✅ 自动添加线索",
-                            value=False
-                        )
-                        clue_count = gr.Number(
-                            label="🎯 每章线索数量",
-                            value=2,
-                            minimum=1,
-                            maximum=10,
-                            step=1
-                        )
+                        with gr.Row():
+                            batch_chapter_count = gr.Number(
+                                label="📦 每次生成章节数",
+                                value=5,
+                                minimum=1,
+                                maximum=50,
+                                step=1,
+                                info="每次从大纲中读取并生成多少章"
+                            )
+                            auto_add_clue = gr.Checkbox(
+                                label="✅ 自动添加线索",
+                                value=False
+                            )
+                        with gr.Row():
+                            clue_count = gr.Number(
+                                label="🎯 每章线索数量",
+                                value=2,
+                                minimum=1,
+                                maximum=10,
+                                step=1
+                            )
+                            error_handling = gr.Radio(
+                                label="🛡️ 错误处理方式",
+                                choices=["❌ 停止生成", "⏭️ 跳过错误章节", "💾 保存上一章内容"],
+                                value="❌ 停止生成",
+                                info="当章节生成失败时的处理方式"
+                            )
                     
                     with gr.Row():
-                        generate_chapter_btn = gr.Button("🚀 生成章节", variant="primary", size="lg")
+                        generate_chapter_btn = gr.Button("🚀 生成单章", variant="primary", size="lg")
                         batch_generate_btn = gr.Button("📦 批量生成", variant="secondary", size="lg")
                 
                 with gr.Column(scale=2):
@@ -301,15 +441,16 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
             
             # 章节列表区域
             gr.Markdown("### 📋 章节列表")
-            chapter_list = gr.Dataframe(
-                label="章节列表",
-                headers=["ID", "章节编号", "章节标题", "创建时间"],
-                datatype=["number", "number", "str", "str"],
-                interactive=False,
-                row_count="dynamic",
-                wrap=True
-            )
-            refresh_chapters_btn = gr.Button("🔄 刷新章节列表", variant="secondary")
+            with gr.Row():
+                with gr.Column(scale=3):
+                    chapter_list_dropdown = gr.Dropdown(
+                        label="📖 选择章节",
+                        choices=[],
+                        interactive=True,
+                        info="从下拉列表中选择要管理的章节"
+                    )
+                with gr.Column(scale=1):
+                    refresh_chapters_btn = gr.Button("🔄 刷新章节列表", variant="secondary")
             
             # 章节详情区域
             gr.Markdown("### 📝 章节详情")
@@ -351,14 +492,16 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
                     
                     with gr.Column(scale=2):
                         gr.Markdown("**📋 线索列表**")
-                        clue_list = gr.Dataframe(
-                            label="线索列表",
-                            headers=["ID", "线索内容", "线索类型", "首次出现章节", "下次出现章节"],
-                            datatype=["number", "str", "str", "number", "number"],
-                            interactive=False,
-                            wrap=True
-                        )
-                        refresh_clues_btn = gr.Button("🔄 刷新线索列表", variant="secondary")
+                        with gr.Row():
+                            with gr.Column(scale=3):
+                                clue_list_dropdown = gr.Dropdown(
+                                    label="📖 选择线索",
+                                    choices=[],
+                                    interactive=True,
+                                    info="从下拉列表中选择要管理的线索"
+                                )
+                            with gr.Column(scale=1):
+                                refresh_clues_btn = gr.Button("🔄 刷新线索列表", variant="secondary")
                 
                 gr.Markdown("**✏️ 编辑线索**")
                 with gr.Row():
@@ -424,7 +567,35 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
         title = extract_title(clean_outline)
         # 确保提示词不为空
         prompt = prompt_input.value if prompt_input.value else f"{title}的小说"
-        return add_novel(title, prompt, clean_outline)
+        result = add_novel(title, prompt, clean_outline)
+        
+        # 解析并保存章节大纲
+        try:
+            chapter_outlines = parse_chapter_outlines(clean_outline)
+            # 获取刚保存的小说 ID
+            import sqlite3
+            conn = sqlite3.connect(db_settings.db_path)
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT id FROM {db_settings.db_table} WHERE title = ? ORDER BY created_at DESC LIMIT 1", (title,))
+            novel = cursor.fetchone()
+            conn.close()
+            
+            if novel:
+                novel_id = novel[0]
+                # 保存每个章节的大纲
+                for chapter_data in chapter_outlines:
+                    add_chapter_outline(
+                        novel_id, 
+                        chapter_data['chapter_number'], 
+                        chapter_data['chapter_title'], 
+                        chapter_data['outline']
+                    )
+                result += f"\n已保存 {len(chapter_outlines)} 个章节大纲"
+        except Exception as e:
+            print(f"保存章节大纲失败：{e}")
+            result += "\n注意：章节大纲保存失败，但小说已保存"
+        
+        return result
     
     save_btn.click(
         fn=save_novel_to_db,
@@ -435,26 +606,27 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
     # 绑定刷新小说列表函数
     def refresh_novel_list():
         novels = get_all_novels()
-        return novels
+        # 转换为 dropdown 的 choices 格式：[(label, value), ...]
+        choices = [(f"{novel[0]} - {novel[1]}", novel[0]) for novel in novels]
+        return gr.update(choices=choices)
     
     refresh_btn.click(
         fn=refresh_novel_list,
-        outputs=novel_list
+        outputs=novel_list_dropdown
     )
     
     # 绑定加载小说函数
-    def load_novel(selected_row):
-        if selected_row.empty:
+    def load_novel(novel_id):
+        if not novel_id:
             return [0, "", "", ""]
-        novel_id = int(selected_row.iloc[0, 0])
         novel = get_novel_by_id(novel_id)
         if novel:
-            return [novel_id, novel[0], novel[1], novel[2]]
+            return [novel[0], novel[1], novel[2], novel[3]]
         return [0, "", "", ""]
     
-    novel_list.select(
+    novel_list_dropdown.change(
         fn=load_novel,
-        inputs=novel_list,
+        inputs=novel_list_dropdown,
         outputs=[novel_id, novel_title, novel_prompt, novel_outline]
     )
     
@@ -477,52 +649,25 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
     # 绑定刷新小说列表函数
     def refresh_novel_list_chapter():
         novels = get_all_novels()
-        return novels
+        # 转换为 dropdown 的 choices 格式：[(label, value), ...]
+        choices = [(f"{novel[0]} - {novel[1]}", novel[0]) for novel in novels]
+        return gr.update(choices=choices)
     
     refresh_novels_btn.click(
         fn=refresh_novel_list_chapter,
-        outputs=novel_list_chapter
+        outputs=novel_list_dropdown_chapter
     )
     
     # 绑定选择小说函数
-    def select_novel_chapter(selected_row, evt: gr.SelectData):
-        print(f"Selected row: {selected_row}")
-        print(f"Selected row type: {type(selected_row)}")
-        print(f"Event index: {evt.index}")
-        
-        try:
-            # 获取选中行的索引
-            row_index = evt.index[0]
-            print(f"Row index: {row_index}")
-            
-            # 尝试处理 pandas DataFrame 格式
-            if hasattr(selected_row, 'iloc'):
-                if selected_row.empty:
-                    return 0
-                novel_id = int(selected_row.iloc[row_index, 0])
-                print(f"Extracted novel_id from DataFrame: {novel_id}")
-                return novel_id
-            # 尝试处理列表格式
-            elif isinstance(selected_row, list):
-                if len(selected_row) > 0:
-                    if isinstance(selected_row[0], list):
-                        # 嵌套列表格式
-                        novel_id = int(selected_row[row_index][0])
-                        print(f"Extracted novel_id from nested list: {novel_id}")
-                        return novel_id
-                    else:
-                        # 单层列表格式
-                        novel_id = int(selected_row[row_index])
-                        print(f"Extracted novel_id from list: {novel_id}")
-                        return novel_id
-        except Exception as e:
-            print(f"Error in select_novel_chapter: {e}")
-        
-        return 0
+    def select_novel_chapter(novel_id):
+        print(f"选择的小说 ID: {novel_id}")
+        if not novel_id:
+            return 0
+        return int(novel_id)
     
-    novel_list_chapter.select(
+    novel_list_dropdown_chapter.change(
         fn=select_novel_chapter,
-        inputs=novel_list_chapter,
+        inputs=novel_list_dropdown_chapter,
         outputs=selected_novel_id
     )
     
@@ -595,7 +740,7 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
     # 批量生成章节
     batch_generate_btn.click(
         fn=batch_generate_chapters,
-        inputs=[selected_novel_id, chapter_number, batch_chapter_count, word_count, temperature, clue_threshold, auto_add_clue, clue_count],
+        inputs=[selected_novel_id, chapter_number, batch_chapter_count, word_count, temperature, clue_threshold, auto_add_clue, error_handling, clue_count],
         outputs=batch_status,
         api_name="batch_generate_chapters"
     )
@@ -603,38 +748,37 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
     # 刷新章节列表
     def refresh_chapters(novel_id):
         if not novel_id:
-            return []
+            return gr.update(choices=[])
         
-        if novel_id:
-            return get_novel_chapters(novel_id)
-        return []
+        chapters = get_novel_chapters(novel_id)
+        # 转换为 dropdown 的 choices 格式：[(label, value), ...]
+        choices = [(f"第{chapter[1]}章 - {chapter[2]}", chapter[0]) for chapter in chapters]
+        return gr.update(choices=choices)
     
     refresh_chapters_btn.click(
         fn=refresh_chapters,
         inputs=selected_novel_id,
-        outputs=chapter_list
+        outputs=chapter_list_dropdown
     )
     
     # 加载章节
-    def load_chapter(selected_row, evt: gr.SelectData):
+    def load_chapter(chapter_id):
         try:
-            # 获取选中行的索引（行号）
-            idx = evt.index[0]
-            # 从数据框中提取该行的 ID（第一列）
-            chapter_id = int(selected_row.iloc[idx, 0])
+            if not chapter_id:
+                return [0, 1, "", ""]
             # 获取章节内容
             chapter = get_chapter_by_id(chapter_id)
             if chapter:
-                return [chapter_id, chapter[0], chapter[1], chapter[2]]
+                return [chapter[0], chapter[1], chapter[2], chapter[3]]
             else:
                 return [0, 1, "", ""]
         except Exception as e:
             print(f"Error in load_chapter: {e}")
             return [0, 1, "", ""]
     
-    chapter_list.select(
+    chapter_list_dropdown.change(
         fn=load_chapter,
-        inputs=[chapter_list],
+        inputs=chapter_list_dropdown,
         outputs=[chapter_id, chapter_num, chapter_title, chapter_text]
     )
     
@@ -652,6 +796,73 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
         outputs=chapter_action_status
     )
     
+    # ========== 章节大纲管理绑定 ==========
+    # 刷新章节大纲列表
+    def refresh_chapter_outlines(novel_id):
+        if not novel_id:
+            return gr.update(choices=[])
+        outlines = get_novel_chapter_outlines(novel_id)
+        # 转换为 dropdown 的 choices 格式：[(label, value), ...]
+        choices = [(f"第{outline[1]}章 - {outline[2]}", outline[0]) for outline in outlines]
+        return gr.update(choices=choices)
+    
+    refresh_outlines_btn.click(
+        fn=refresh_chapter_outlines,
+        inputs=selected_novel_id,
+        outputs=chapter_outline_list_dropdown
+    )
+    
+    # 当选择小说时，自动刷新章节大纲列表
+    selected_novel_id.change(
+        fn=refresh_chapter_outlines,
+        inputs=selected_novel_id,
+        outputs=chapter_outline_list_dropdown
+    )
+    
+    # 加载章节大纲
+    def load_chapter_outline(outline_id):
+        try:
+            if not outline_id:
+                return [0, 1, "", ""]
+            outline = get_chapter_outline_by_id(outline_id)
+            if outline:
+                return [outline[0], outline[2], outline[3], outline[4]]
+            else:
+                return [0, 1, "", ""]
+        except Exception as e:
+            print(f"Error in load_chapter_outline: {e}")
+            return [0, 1, "", ""]
+    
+    chapter_outline_list_dropdown.change(
+        fn=load_chapter_outline,
+        inputs=chapter_outline_list_dropdown,
+        outputs=[outline_id, outline_chapter_num, outline_chapter_title, outline_text]
+    )
+    
+    # 更新章节大纲
+    def update_chapter_outline_func(outline_id, chapter_num, chapter_title, outline_text):
+        if not outline_id:
+            return "大纲 ID 不能为空"
+        return update_chapter_outline(outline_id, chapter_num, chapter_title, outline_text)
+    
+    update_outline_btn.click(
+        fn=update_chapter_outline_func,
+        inputs=[outline_id, outline_chapter_num, outline_chapter_title, outline_text],
+        outputs=outline_action_status
+    )
+    
+    # 删除章节大纲
+    def delete_chapter_outline_func(outline_id):
+        if not outline_id:
+            return "大纲 ID 不能为空"
+        return delete_chapter_outline(outline_id)
+    
+    delete_outline_btn.click(
+        fn=delete_chapter_outline_func,
+        inputs=outline_id,
+        outputs=outline_action_status
+    )
+    
     # 绑定添加线索函数
     def add_new_clue(novel_id, text, clue_type, chapter):
         if not novel_id:
@@ -667,24 +878,25 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
     # 刷新线索列表
     def refresh_clues(novel_id):
         if not novel_id:
-            return []
-        return get_novel_clues(novel_id)
+            return gr.update(choices=[])
+        clues = get_novel_clues(novel_id)
+        # 转换为 dropdown 的 choices 格式：[(label, value), ...]
+        choices = [(f"[{clue[2]}] {clue[1][:30]}...", clue[0]) for clue in clues]
+        return gr.update(choices=choices)
     
     refresh_clues_btn.click(
         fn=refresh_clues,
         inputs=selected_novel_id,
-        outputs=clue_list
+        outputs=clue_list_dropdown
     )
     
     # 加载线索
-    def load_clue(selected_row, evt: gr.SelectData):
+    def load_clue(clue_id):
         try:
-            # 获取选中行的索引（行号）
-            idx = evt.index[0]
-            # 从数据框中提取该行的 ID（第一列）
-            clue_id = int(selected_row.iloc[idx, 0])
+            if not clue_id:
+                return [0, "", "明潮", 1]
             # 获取线索内容
-            clues = get_novel_clues(novel_id.value)
+            clues = get_novel_clues(selected_novel_id.value)
             for clue in clues:
                 if clue[0] == clue_id:
                     return [clue_id, clue[1], clue[2], clue[3]]
@@ -693,9 +905,9 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
             print(f"Error in load_clue: {e}")
             return [0, "", "明潮", 1]
     
-    clue_list.select(
+    clue_list_dropdown.change(
         fn=load_clue,
-        inputs=[clue_list],
+        inputs=clue_list_dropdown,
         outputs=[clue_id, clue_text_edit, clue_type_edit, clue_chapter_edit]
     )
     
@@ -716,7 +928,7 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
     # 初始化
     demo.load(
         fn=refresh_novel_list_chapter,
-        outputs=novel_list_chapter
+        outputs=novel_list_dropdown_chapter
     )
 
 if __name__ == "__main__":

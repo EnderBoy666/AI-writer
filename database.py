@@ -70,6 +70,20 @@ def init_db():
     )
     """)
     
+    # 创建章节大纲表
+    cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS chapter_outlines (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        novel_id INTEGER NOT NULL,
+        chapter_number INTEGER NOT NULL,
+        chapter_title TEXT NOT NULL,
+        outline TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (novel_id) REFERENCES {db_settings.db_table} (id),
+        UNIQUE(novel_id, chapter_number)
+    )
+    """)
+    
     conn.commit()
     conn.close()
 
@@ -98,7 +112,7 @@ def get_novel_by_id(novel_id):
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
     cursor.execute(f"""
-    SELECT title, prompt, outline FROM {db_settings.db_table} WHERE id = ?
+    SELECT id, title, prompt, outline FROM {db_settings.db_table} WHERE id = ?
     """, (novel_id,))
     novel = cursor.fetchone()
     conn.close()
@@ -164,12 +178,10 @@ def get_next_chapter_number(novel_id):
 def get_chapter_by_id(chapter_id):
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
-    print(f"get_chapter_by_id called with chapter_id: {chapter_id}")  # 调试信息
     cursor.execute(f"""
-    SELECT chapter_number, chapter_title, content FROM {db_settings.chapter_table} WHERE id = ?
+    SELECT id, chapter_number, chapter_title, content FROM {db_settings.chapter_table} WHERE id = ?
     """, (chapter_id,))
     chapter = cursor.fetchone()
-    print(f"Retrieved chapter: {chapter}")  # 调试信息
     conn.close()
     return chapter
 
@@ -233,3 +245,71 @@ def delete_clue(clue_id):
     conn.commit()
     conn.close()
     return "线索已删除"
+
+# 章节大纲相关函数
+def add_chapter_outline(novel_id, chapter_number, chapter_title, outline):
+    conn = sqlite3.connect(db_settings.db_path)
+    cursor = conn.cursor()
+    cursor.execute(f"""
+    INSERT INTO chapter_outlines (novel_id, chapter_number, chapter_title, outline) 
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(novel_id, chapter_number) 
+    DO UPDATE SET chapter_title = excluded.chapter_title, outline = excluded.outline
+    """, (novel_id, chapter_number, chapter_title, outline))
+    conn.commit()
+    conn.close()
+    return "章节大纲已保存"
+
+def get_novel_chapter_outlines(novel_id):
+    conn = sqlite3.connect(db_settings.db_path)
+    cursor = conn.cursor()
+    cursor.execute(f"""
+    SELECT id, chapter_number, chapter_title, outline FROM chapter_outlines 
+    WHERE novel_id = ? ORDER BY chapter_number ASC
+    """, (novel_id,))
+    outlines = cursor.fetchall()
+    conn.close()
+    return outlines
+
+def get_chapter_outline_by_id(outline_id):
+    conn = sqlite3.connect(db_settings.db_path)
+    cursor = conn.cursor()
+    cursor.execute(f"""
+    SELECT id, novel_id, chapter_number, chapter_title, outline FROM chapter_outlines 
+    WHERE id = ?
+    """, (outline_id,))
+    outline = cursor.fetchone()
+    conn.close()
+    return outline
+
+def update_chapter_outline(outline_id, chapter_number, chapter_title, outline):
+    conn = sqlite3.connect(db_settings.db_path)
+    cursor = conn.cursor()
+    cursor.execute(f"""
+    UPDATE chapter_outlines SET chapter_number = ?, chapter_title = ?, outline = ? 
+    WHERE id = ?
+    """, (chapter_number, chapter_title, outline, outline_id))
+    conn.commit()
+    conn.close()
+    return "章节大纲已更新"
+
+def delete_chapter_outline(outline_id):
+    conn = sqlite3.connect(db_settings.db_path)
+    cursor = conn.cursor()
+    cursor.execute(f"""
+    DELETE FROM chapter_outlines WHERE id = ?
+    """, (outline_id,))
+    conn.commit()
+    conn.close()
+    return "章节大纲已删除"
+
+def get_chapter_outline(novel_id, chapter_number):
+    conn = sqlite3.connect(db_settings.db_path)
+    cursor = conn.cursor()
+    cursor.execute(f"""
+    SELECT chapter_title, outline FROM chapter_outlines 
+    WHERE novel_id = ? AND chapter_number = ?
+    """, (novel_id, chapter_number))
+    outline = cursor.fetchone()
+    conn.close()
+    return outline

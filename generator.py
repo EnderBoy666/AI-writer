@@ -399,12 +399,12 @@ def extract_title(outline):
     return "未知标题"
 
 # 生成章节的函数
-def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_threshold=3):
-    # 确保novel_id是整数
-    print(f"处理小说选择值: {novel_id}")
+def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_threshold=3, chapter_outline=None):
+    # 确保 novel_id 是整数
+    print(f"处理小说选择值：{novel_id}")
     
     if not novel_id:
-        return "无效的小说ID"
+        return "无效的小说 ID"
     
     # 获取小说信息
     print("正在获取小说信息...")
@@ -422,6 +422,14 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
     novel_title, outline, total_chapters = novel
     print(f"小说标题：{novel_title}")
     print(f"总章节数：{total_chapters}")
+    
+    # 如果没有提供章节大纲，尝试从数据库获取
+    if chapter_outline is None:
+        from database import get_chapter_outline
+        outline_data = get_chapter_outline(novel_id, chapter_number)
+        if outline_data:
+            chapter_outline = outline_data[1]
+            print(f"已加载第{chapter_number}章大纲")
     
     # 获取上一章节内容
     previous_chapter = None
@@ -455,6 +463,8 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
     system_prompt = f"你是一位专业的小说作家，擅长根据大纲和上一章节生成新的章节。请根据以下信息生成第{chapter_number}章。\n"
     system_prompt += f"小说标题：{novel_title}\n"
     system_prompt += f"小说大纲：{outline}\n"
+    if chapter_outline:
+        system_prompt += f"第{chapter_number}章详细大纲：{chapter_outline}\n"
     if previous_chapter:
         system_prompt += f"上一章节内容：{previous_chapter}\n"
     
@@ -511,6 +521,11 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
     # 添加章节内容
     formatted_content += '\n'.join(lines[skip_lines:])
     chapter_content = formatted_content
+    
+    # 验证生成内容的有效性
+    content_text = '\n'.join(lines[skip_lines:]).strip()
+    if not content_text or len(content_text) < 50:  # 内容太短，可能是生成失败
+        return f"第{chapter_number}章生成失败：内容过短或为空，请重试"
     
     # 检查章节编号是否已存在
     print("正在检查章节编号...")
@@ -700,6 +715,13 @@ def generate_chapter_streaming(novel_id, chapter_number, word_count, temperature
         formatted_content += '\n'.join(lines[skip_lines:])
         chapter_content = formatted_content
         
+        # 验证生成内容的有效性
+        content_text = '\n'.join(lines[skip_lines:]).strip()
+        if not content_text or len(content_text) < 50:  # 内容太短，可能是生成失败
+            progress_text += f"\n错误：第{chapter_number}章生成失败：内容过短或为空，请重试\n"
+            yield progress_text
+            return
+        
         # 显示生成的章节内容
         progress_text += chapter_content + "\n"
         progress_text += "\n=== 生成完成 ===\n"
@@ -772,17 +794,17 @@ def generate_chapter_streaming(novel_id, chapter_number, word_count, temperature
 # 从章节内容中提取线索的函数
 def extract_clues_from_chapter(chapter_content, chapter_number, novel_outline, total_chapters, clue_count=2):
     """
-    使用AI从章节内容中提取线索，并根据大纲推测预计出现章节数
+    使用 AI 从章节内容中提取线索，并根据大纲推测预计出现章节数
     """
     try:
         # 输入验证
         if not chapter_content or not isinstance(chapter_content, str):
             return []
         
-        # 构建系统提示，使用文本格式而非JSON
+        # 构建系统提示，使用文本格式而非 JSON
         system_prompt = f"你是一位专业的小说编辑，擅长从小说章节中识别和提取线索。请从以下章节内容中提取{clue_count}个重要的线索，包括明潮和暗涌两种类型。\n\n要求：\n1. 分析章节内容，识别出{clue_count}个重要的线索\n2. 为每条线索指定类型（明潮或暗涌）\n3. 基于小说大纲，推测每条线索的预计下次出现章节数\n4. 输出格式为：每条线索两行，第一行为「类型：线索内容」，第二行为「预计出现章节：X」\n5. 确保线索格式规范，内容简洁明了\n6. 只输出线索，不输出其他内容"
         
-        # 调用AI生成线索
+        # 调用 AI 生成线索
         response = client.generate(
             model=ollama_settings.model,
             prompt=f"{system_prompt}\n\n章节内容：{chapter_content}\n\n小说大纲：{novel_outline}",
@@ -829,3 +851,64 @@ def extract_clues_from_chapter(chapter_content, chapter_number, novel_outline, t
     except Exception as e:
         print(f"提取线索时出错：{str(e)}")
         return []
+
+# 解析章节大纲的函数
+def parse_chapter_outlines(outline_text, start_chapter=1):
+    """
+    从完整大纲中解析出各章节的标题和大纲内容
+    
+    参数：
+    - outline_text: 完整的大纲文本
+    - start_chapter: 起始章节编号
+    
+    返回：
+    - list of dict: [{'chapter_number': int, 'chapter_title': str, 'outline': str}, ...]
+    """
+    chapter_outlines = []
+    lines = outline_text.strip().split('\n')
+    
+    current_chapter = None
+    current_title = ""
+    current_outline_lines = []
+    
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        
+        # 尝试匹配章节标题（例如：第 1 章、第一章、Chapter 1 等）
+        chapter_match = None
+        if line.startswith('第') and ('章' in line or '节' in line):
+            # 中文格式：第 X 章
+            import re
+            match = re.search(r'第 [零一二三四五六七八九十百千万 0-9]+[章节]', line)
+            if match:
+                chapter_match = match.group()
+        
+        if chapter_match:
+            # 保存之前的章节
+            if current_chapter is not None:
+                chapter_outlines.append({
+                    'chapter_number': current_chapter,
+                    'chapter_title': current_title.strip(),
+                    'outline': '\n'.join(current_outline_lines).strip()
+                })
+            
+            # 开始新章节
+            current_chapter = len(chapter_outlines) + start_chapter
+            current_title = chapter_match
+            current_outline_lines = []
+        elif current_chapter is not None:
+            # 添加到当前章节的大纲内容
+            current_outline_lines.append(line)
+        
+        i += 1
+    
+    # 保存最后一个章节
+    if current_chapter is not None:
+        chapter_outlines.append({
+            'chapter_number': current_chapter,
+            'chapter_title': current_title.strip(),
+            'outline': '\n'.join(current_outline_lines).strip()
+        })
+    
+    return chapter_outlines

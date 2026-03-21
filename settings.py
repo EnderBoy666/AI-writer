@@ -49,8 +49,8 @@ class OutlineSettings:
         self.default_chapter_count = 5
         # 默认每章字数
         self.default_chapter_word_count = 1000
-        # 默认章节间隔
-        self.default_chapter_interval = 2
+        # 默认章节间隔（每隔多少章拆分成小事件）
+        self.default_chapter_interval = 5
         # 最小章节数
         self.min_chapter_count = 3
         # 最大章节数
@@ -99,8 +99,8 @@ class DeepSeekSettings:
 # 大纲生成设置
 class OutlineGenerationSettings:
     def __init__(self):
-        # 默认拆分次数
-        self.default_split_count = 1
+        # 默认拆分次数（将大纲拆分成几段进行输出）
+        self.default_split_count = 3
         # 最小拆分次数
         self.min_split_count = 1
         # 最大拆分次数
