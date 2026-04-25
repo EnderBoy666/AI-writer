@@ -7,3 +7,4 @@ test_data
 /__pycache__
 .venv
 .gradio
+exports

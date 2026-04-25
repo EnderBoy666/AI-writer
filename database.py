@@ -70,17 +70,21 @@ def init_db():
     )
     """)
     
-    # 创建章节大纲表
+
+    
+    # 创建使用统计表
     cursor.execute(f"""
-    CREATE TABLE IF NOT EXISTS chapter_outlines (
+    CREATE TABLE IF NOT EXISTS usage_statistics (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        novel_id INTEGER NOT NULL,
-        chapter_number INTEGER NOT NULL,
-        chapter_title TEXT NOT NULL,
-        outline TEXT NOT NULL,
+        event_type TEXT NOT NULL,  -- 事件类型：generate_outline, generate_chapter, batch_generate, etc.
+        novel_id INTEGER,
+        chapter_number INTEGER,
+        token_count INTEGER DEFAULT 0,
+        word_count INTEGER DEFAULT 0,
+        temperature REAL,
+        duration_seconds REAL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (novel_id) REFERENCES {db_settings.db_table} (id),
-        UNIQUE(novel_id, chapter_number)
+        FOREIGN KEY (novel_id) REFERENCES {db_settings.db_table} (id)
     )
     """)
     
@@ -112,7 +116,7 @@ def get_novel_by_id(novel_id):
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
     cursor.execute(f"""
-    SELECT id, title, prompt, outline FROM {db_settings.db_table} WHERE id = ?
+    SELECT id, title, prompt, outline, total_chapters, chapter_word_count FROM {db_settings.db_table} WHERE id = ?
     """, (novel_id,))
     novel = cursor.fetchone()
     conn.close()
@@ -158,12 +162,23 @@ def get_novel_chapters(novel_id):
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
     cursor.execute(f"""
-    SELECT id, chapter_number, chapter_title, created_at FROM {db_settings.chapter_table} WHERE novel_id = ? ORDER BY chapter_number ASC
+    SELECT id, chapter_number, chapter_title, content, created_at FROM {db_settings.chapter_table} WHERE novel_id = ? ORDER BY chapter_number ASC
     """, (novel_id,))
     chapters = cursor.fetchall()
     conn.close()
-    # 将元组转换为列表，确保DataFrame组件能正确显示
     return [list(chapter) for chapter in chapters]
+
+def get_chapter_by_number(novel_id, chapter_number):
+    """获取指定章节的完整内容"""
+    conn = sqlite3.connect(db_settings.db_path)
+    cursor = conn.cursor()
+    cursor.execute(f"""
+    SELECT id, chapter_number, chapter_title, content FROM {db_settings.chapter_table} 
+    WHERE novel_id = ? AND chapter_number = ?
+    """, (novel_id, chapter_number))
+    chapter = cursor.fetchone()
+    conn.close()
+    return chapter
 
 def get_next_chapter_number(novel_id):
     conn = sqlite3.connect(db_settings.db_path)
@@ -258,58 +273,135 @@ def add_chapter_outline(novel_id, chapter_number, chapter_title, outline):
     """, (novel_id, chapter_number, chapter_title, outline))
     conn.commit()
     conn.close()
-    return "章节大纲已保存"
 
-def get_novel_chapter_outlines(novel_id):
+
+# 使用统计相关函数
+def record_usage(event_type, novel_id=None, chapter_number=None, token_count=0, word_count=0, temperature=None, duration_seconds=None):
+    """记录使用统计信息"""
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
     cursor.execute(f"""
-    SELECT id, chapter_number, chapter_title, outline FROM chapter_outlines 
-    WHERE novel_id = ? ORDER BY chapter_number ASC
-    """, (novel_id,))
-    outlines = cursor.fetchall()
-    conn.close()
-    return outlines
-
-def get_chapter_outline_by_id(outline_id):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    SELECT id, novel_id, chapter_number, chapter_title, outline FROM chapter_outlines 
-    WHERE id = ?
-    """, (outline_id,))
-    outline = cursor.fetchone()
-    conn.close()
-    return outline
-
-def update_chapter_outline(outline_id, chapter_number, chapter_title, outline):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    UPDATE chapter_outlines SET chapter_number = ?, chapter_title = ?, outline = ? 
-    WHERE id = ?
-    """, (chapter_number, chapter_title, outline, outline_id))
+    INSERT INTO usage_statistics (event_type, novel_id, chapter_number, token_count, word_count, temperature, duration_seconds)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (event_type, novel_id, chapter_number, token_count, word_count, temperature, duration_seconds))
     conn.commit()
     conn.close()
-    return "章节大纲已更新"
 
-def delete_chapter_outline(outline_id):
+def get_usage_statistics(start_date=None, end_date=None):
+    """获取使用统计数据"""
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
-    cursor.execute(f"""
-    DELETE FROM chapter_outlines WHERE id = ?
-    """, (outline_id,))
-    conn.commit()
+    
+    # 基础查询
+    base_query = f"SELECT * FROM usage_statistics WHERE 1=1"
+    params = []
+    
+    # 添加日期过滤
+    if start_date:
+        base_query += " AND date(created_at) >= date(?)"
+        params.append(start_date)
+    if end_date:
+        base_query += " AND date(created_at) <= date(?)"
+        params.append(end_date)
+    
+    cursor.execute(base_query, params)
+    records = cursor.fetchall()
     conn.close()
-    return "章节大纲已删除"
+    return records
 
-def get_chapter_outline(novel_id, chapter_number):
+def get_statistics_summary(start_date=None, end_date=None):
+    """获取统计数据摘要"""
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
+    
+    # 基础查询条件
+    base_where = "WHERE 1=1"
+    params = []
+    
+    if start_date:
+        base_where += " AND date(created_at) >= date(?)"
+        params.append(start_date)
+    if end_date:
+        base_where += " AND date(created_at) <= date(?)"
+        params.append(end_date)
+    
+    # 总体统计
     cursor.execute(f"""
-    SELECT chapter_title, outline FROM chapter_outlines 
-    WHERE novel_id = ? AND chapter_number = ?
-    """, (novel_id, chapter_number))
-    outline = cursor.fetchone()
+    SELECT 
+        COUNT(*) as total_events,
+        SUM(token_count) as total_tokens,
+        SUM(word_count) as total_words,
+        COUNT(DISTINCT novel_id) as novels_count,
+        AVG(temperature) as avg_temperature
+    FROM usage_statistics {base_where}
+    """, params)
+    overall = cursor.fetchone()
+    
+    # 按事件类型统计
+    cursor.execute(f"""
+    SELECT 
+        event_type,
+        COUNT(*) as count,
+        SUM(token_count) as tokens,
+        SUM(word_count) as words
+    FROM usage_statistics {base_where}
+    GROUP BY event_type
+    """, params)
+    by_type = cursor.fetchall()
+    
+    # 按小说统计（前 10 个）
+    cursor.execute(f"""
+    SELECT 
+        n.title,
+        COUNT(us.id) as events,
+        SUM(us.token_count) as tokens,
+        SUM(us.word_count) as words
+    FROM usage_statistics us
+    LEFT JOIN {db_settings.db_table} n ON us.novel_id = n.id
+    {base_where}
+    GROUP BY us.novel_id, n.title
+    ORDER BY events DESC
+    LIMIT 10
+    """, params)
+    by_novel = cursor.fetchall()
+    
+    # 每日趋势（最近 30 天）
+    cursor.execute(f"""
+    SELECT 
+        date(created_at) as date,
+        COUNT(*) as events,
+        SUM(token_count) as tokens,
+        SUM(word_count) as words
+    FROM usage_statistics
+    WHERE date(created_at) >= date('now', '-30 days')
+    GROUP BY date(created_at)
+    ORDER BY date DESC
+    """)
+    daily_trend = cursor.fetchall()
+    
     conn.close()
-    return outline
+    
+    return {
+        'overall': overall,
+        'by_type': by_type,
+        'by_novel': by_novel,
+        'daily_trend': daily_trend
+    }
+
+def get_total_tokens():
+    """获取总 token 使用量"""
+    conn = sqlite3.connect(db_settings.db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COALESCE(SUM(token_count), 0) FROM usage_statistics")
+    total = cursor.fetchone()[0]
+    conn.close()
+    return total
+
+def get_total_generations():
+    """获取总生成次数"""
+    conn = sqlite3.connect(db_settings.db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM usage_statistics")
+    total = cursor.fetchone()[0]
+    conn.close()
+    return total

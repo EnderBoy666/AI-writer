@@ -1,12 +1,14 @@
-# Ollama模型设置
+# Ollama 模型设置
 class OllamaSettings:
     def __init__(self):
-        # 使用的Ollama模型名称
-        self.model = "qwen3:8b"
-        # Ollama服务的基础URL
+        # 使用的 Ollama 模型名称
+        self.model = "qwen3.5:9b"
+        # Ollama 服务的基础 URL
         self.base_url = "http://localhost:11434"
+        # 超时时间（秒），默认 1800 秒（30 分钟）
+        self.timeout = 1800
 
-# Gradio界面设置
+# Gradio 界面设置
 class GradioSettings:
     def __init__(self):
         # 界面标题
@@ -41,6 +43,14 @@ class ChapterSettings:
         self.min_temperature = 0.1
         # 最大生成温度
         self.max_temperature = 1.0
+        # 默认附加提示词（用户可以为章节生成添加额外的要求或说明）
+        self.default_additional_prompt = ""
+        # 默认重试次数
+        self.default_retry_count = 3
+        # 最小重试次数
+        self.min_retry_count = 1
+        # 最大重试次数
+        self.max_retry_count = 10
 
 # 大纲生成设置
 class OutlineSettings:
@@ -76,24 +86,24 @@ class ClueSettings:
         # 默认线索频率（线索平均出现频率，章节间隔）
         self.default_clue_frequency = 2
 
-# Token限制设置
+# Token 限制设置
 class TokenSettings:
     def __init__(self):
-        # 大纲生成的最大token数
+        # 大纲生成的最大 token 数
         self.max_tokens_outline = 3000
-        # 章节生成的token系数（每字对应的token数）
+        # 章节生成的 token 系数（每字对应的 token 数）
         self.token_coefficient_chapter = 2
-        # 线索提取的最大token数
+        # 线索提取的最大 token 数
         self.max_tokens_clue_extraction = 1500
 
-# DeepSeek模型设置
+# DeepSeek 模型设置
 class DeepSeekSettings:
     def __init__(self):
         # 是否启用思考模式
         self.enable_thinking = True
         # 思考模式的温度值
         self.thinking_temperature = 0.7
-        # 思考模式的最大token数
+        # 思考模式的最大 token 数
         self.max_tokens_thinking = 2000
 
 # 大纲生成设置
@@ -107,3 +117,25 @@ class OutlineGenerationSettings:
         self.max_split_count = 10
         # 骨架章节数（用于初始大纲生成）
         self.skeleton_chapter_count = 5
+
+# 压缩生成设置
+class CompressionGenerationSettings:
+    def __init__(self):
+        # 默认压缩阈值（超过多少章后开始压缩前文）
+        self.default_compression_threshold = 5
+        # 最小压缩阈值
+        self.min_compression_threshold = 3
+        # 最大压缩阈值
+        self.max_compression_threshold = 20
+        # 默认保留章节数（压缩时保留最近多少章的详细内容）
+        self.default_keep_recent_chapters = 2
+        # 最小保留章节数
+        self.min_keep_recent_chapters = 1
+        # 最大保留章节数
+        self.max_keep_recent_chapters = 5
+        # 默认每次生成章节数
+        self.default_batch_size = 1
+        # 最小每次生成章节数
+        self.min_batch_size = 1
+        # 最大每次生成章节数
+        self.max_batch_size = 5
