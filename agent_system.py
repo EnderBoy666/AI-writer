@@ -318,8 +318,8 @@ class PlanningAgent(BaseAgent):
 【小说总纲（节选）】
 {novel_outline[:3000] if novel_outline else '暂无总纲'}
 
-【上一章内容结尾（约500字）】
-{content.get('previous_chapter', '')[-500:] if content.get('previous_chapter') else '这是第一章，无上一章内容'}
+【历史章节内容】
+{content.get('previous_chapters_text', '这是第一章，无历史章节内容')}
 
 【活跃线索】
 {clues_text}
@@ -332,9 +332,9 @@ class PlanningAgent(BaseAgent):
 4. 场景分解（每个场景的主要内容）
 5. 字数分配建议
 6. 注意线索的自然铺设和推进
-7. 规划必须与上一章内容自然衔接，符合小说总纲的设定
+7. 规划必须与历史章节内容自然衔接，符合小说总纲的设定
 
-请结合小说总纲、上一章内容和本章大纲，以清晰的格式输出规划内容。"""
+请结合小说总纲、历史章节内容和本章大纲，以清晰的格式输出规划内容。"""
         return prompt
     
     def _extract_chapter_from_outline(self, outline: str, chapter_num: int) -> str:
@@ -538,7 +538,7 @@ class WritingAgent(BaseAgent):
         """构建撰写提示词"""
         plan = content.get('chapter_plan', {})
         active_clues = content.get('active_clues', [])
-        previous_chapter = content.get('previous_chapter', '')
+        previous_chapters_text = content.get('previous_chapters_text', '')
         novel_outline = content.get('novel_outline', '')
         
         # 构建线索信息
@@ -560,8 +560,8 @@ class WritingAgent(BaseAgent):
 【小说总纲】
 {novel_outline[:2000] if novel_outline else '暂无总纲'}
 
-【上一章内容结尾（约500字）】
-{previous_chapter[-500:] if previous_chapter else '这是第一章'}
+【历史章节内容】
+{previous_chapters_text if previous_chapters_text else '这是第一章，无历史章节内容'}
 
 【章节规划】
 结构：{plan_structure if plan_structure else '无'}
@@ -573,7 +573,7 @@ class WritingAgent(BaseAgent):
 
 【撰写要求】
 1. 严格按照规划的结构、情节点和场景进行创作
-2. 必须与上一章内容自然衔接，不要重复上一章的开头情节
+2. 必须与历史章节内容自然衔接，不要重复前面的开头情节
 3. 保持文风一致，情节连贯，符合小说总纲设定
 4. 注重角色塑造和对话自然
 5. 避免使用 markdown 格式
@@ -669,7 +669,8 @@ class PolishingAgent(BaseAgent):
                 )
             
             prompt = self._build_polishing_prompt(content)
-            ai_response = call_ollama(prompt, temperature=0.6, num_predict=token_settings.max_tokens_outline, agent_name="润色Agent")
+            max_tokens = content.get('max_tokens', 8000)
+            ai_response = call_ollama(prompt, temperature=0.6, num_predict=max_tokens, agent_name="润色Agent")
             polished_result = self._parse_polished(ai_response)
             response_time = time.time() - start_time
             
@@ -791,7 +792,8 @@ class ReviewAgent(BaseAgent):
         try:
             content = task.content
             prompt = self._build_review_prompt(content)
-            ai_response = call_ollama(prompt, temperature=0.5, num_predict=token_settings.max_tokens_outline, agent_name="审核Agent")
+            max_tokens = content.get('max_tokens', 2000)
+            ai_response = call_ollama(prompt, temperature=0.5, num_predict=max_tokens, agent_name="审核Agent")
             review_result = self._parse_review(ai_response)
             response_time = time.time() - start_time
             
@@ -940,12 +942,14 @@ class Coordinator:
                         chapter_theme: str,
                         novel_outline: str,
                         active_clues: Optional[List[Dict]] = None,
-                        previous_chapter: Optional[str] = None,
+                        previous_chapters: Optional[List[Dict]] = None,
+                        previous_chapter_guidance: Optional[str] = None,
                         target_audience: str = "普通读者",
                         content_style: str = "传统叙事",
                         target_word_count: int = 2000,
                         temperature: float = 0.7,
-                        generate_next_chapter_guidance: bool = False) -> Dict:
+                        generate_next_chapter_guidance: bool = False,
+                        max_tokens: int = 8000) -> Dict:
         """生成章节的主流程"""
         
         task_id = f"chapter_{chapter_number}_{int(time.time())}"
@@ -954,6 +958,7 @@ class Coordinator:
         print(f"\n{'='*60}")
         print(f"[协调器] 开始生成第{chapter_number}章")
         print(f"任务 ID: {task_id}")
+        print(f"传入历史章节数：{len(previous_chapters) if previous_chapters else 0}")
         print(f"{'='*60}\n")
         
         self.current_chapter_task = {
@@ -970,7 +975,7 @@ class Coordinator:
             print(f"  - chapter_number: {chapter_number}")
             print(f"  - novel_outline长度: {len(novel_outline) if novel_outline else 0}字")
             print(f"  - active_clues数量: {len(active_clues) if active_clues else 0}")
-            print(f"  - previous_chapter长度: {len(previous_chapter) if previous_chapter else 0}字")
+            print(f"  - previous_chapters数量: {len(previous_chapters) if previous_chapters else 0}")
             print(f"  - generate_next_chapter_guidance: {generate_next_chapter_guidance}")
             
             # Step 1: 内容规划
@@ -980,7 +985,8 @@ class Coordinator:
                 chapter_theme=chapter_theme,
                 novel_outline=novel_outline,
                 active_clues=active_clues,
-                previous_chapter=previous_chapter,
+                previous_chapters=previous_chapters,
+                previous_chapter_guidance=previous_chapter_guidance,
                 target_audience=target_audience,
                 content_style=content_style
             )
@@ -994,7 +1000,7 @@ class Coordinator:
                 chapter_number=chapter_number,
                 plan=plan_result,
                 active_clues=active_clues or [],
-                previous_chapter=previous_chapter,
+                previous_chapters=previous_chapters,
                 novel_outline=novel_outline,
                 target_word_count=target_word_count,
                 style_guide=content_style
@@ -1019,7 +1025,8 @@ class Coordinator:
                 task_id=task_id,
                 chapter_content=chapter_text,
                 active_clues=active_clues or [],
-                style_requirements=content_style
+                style_requirements=content_style,
+                max_tokens=max_tokens
             )
             
             if not polishing_result:
@@ -1036,7 +1043,8 @@ class Coordinator:
                 task_id=task_id,
                 chapter_content=final_content,
                 active_clues=active_clues or [],
-                original_plan=plan_result
+                original_plan=plan_result,
+                max_tokens=max_tokens
             )
             
             # Step 5: 根据审核结果决定下一步
@@ -1053,7 +1061,7 @@ class Coordinator:
                         chapter_content=final_content,
                         novel_outline=novel_outline,
                         active_clues=active_clues or [],
-                        previous_chapter=previous_chapter,
+                        previous_chapters=previous_chapters,
                         target_audience=target_audience,
                         content_style=content_style
                     )
@@ -1085,15 +1093,42 @@ class Coordinator:
                 )
                 
                 total_time = time.time() - start_time
+                
+                # 生成下一章指导文字（如果需要），即使审核未通过也应该生成
+                next_chapter_guidance = None
+                if generate_next_chapter_guidance:
+                    # 提取润色后的内容用于生成指导文字
+                    if isinstance(polishing_result, dict):
+                        guidance_content = polishing_result.get('polished_content', '')
+                    else:
+                        guidance_content = polishing_result
+                    
+                    next_chapter_guidance = self._step_next_chapter_guidance(
+                        task_id=task_id,
+                        chapter_number=chapter_number,
+                        chapter_content=guidance_content,
+                        novel_outline=novel_outline,
+                        active_clues=active_clues or [],
+                        previous_chapters=previous_chapters,
+                        target_audience=target_audience,
+                        content_style=content_style
+                    )
+                
                 self._complete_task(task_id, revision_result, review_result, total_time)
                 
-                return {
+                result = {
                     "success": True,
                     "chapter_content": revision_result,
                     "review": review_result,
                     "revised": True,
                     "metrics": self._get_task_metrics(task_id)
                 }
+                
+                # 添加下一章指导文字
+                if next_chapter_guidance:
+                    result["next_chapter_guidance"] = next_chapter_guidance
+                
+                return result
                 
         except Exception as e:
             print(f"[协调器] 任务失败：{e}")
@@ -1120,7 +1155,7 @@ class Coordinator:
                 "current_chapter_content": kwargs.get('chapter_content'),
                 "novel_outline": kwargs.get('novel_outline'),
                 "active_clues": kwargs.get('active_clues', []),
-                "previous_chapter": kwargs.get('previous_chapter'),
+                "previous_chapters": kwargs.get('previous_chapters'),
                 "target_audience": kwargs.get('target_audience'),
                 "content_style": kwargs.get('content_style')
             },
@@ -1156,6 +1191,21 @@ class Coordinator:
         """Step 1: 内容规划"""
         print("\n[协调器] Step 1: 内容规划")
         
+        # 构建历史章节内容字符串
+        previous_chapters = kwargs.get('previous_chapters', [])
+        previous_chapter_guidance = kwargs.get('previous_chapter_guidance')
+        
+        previous_chapters_text = ""
+        if previous_chapters:
+            for ch_data in previous_chapters:
+                ch_num = ch_data.get('chapter_number', '')
+                ch_content = ch_data.get('content', '')
+                previous_chapters_text += f"第{ch_num}章:\n{ch_content}\n\n"
+            if previous_chapter_guidance:
+                previous_chapters_text += f"最新章指导文字:\n{previous_chapter_guidance}\n"
+        else:
+            previous_chapters_text = "这是第一章，无历史章节内容"
+        
         task = TaskMessage(
             task_id=f"{kwargs['task_id']}_plan",
             sender="coordinator",
@@ -1167,7 +1217,7 @@ class Coordinator:
                 "novel_outline": kwargs.get('novel_outline'),
                 "chapter_outline": kwargs.get('chapter_outline'),
                 "active_clues": kwargs.get('active_clues', []),
-                "previous_chapter": kwargs.get('previous_chapter'),
+                "previous_chapters_text": previous_chapters_text,
                 "target_audience": kwargs.get('target_audience'),
                 "content_style": kwargs.get('content_style')
             },
@@ -1202,6 +1252,18 @@ class Coordinator:
         """Step 2: 内容撰写"""
         print("\n[协调器] Step 2: 内容撰写")
         
+        # 构建历史章节内容字符串
+        previous_chapters = kwargs.get('previous_chapters', [])
+        
+        previous_chapters_text = ""
+        if previous_chapters:
+            for ch_data in previous_chapters:
+                ch_num = ch_data.get('chapter_number', '')
+                ch_content = ch_data.get('content', '')
+                previous_chapters_text += f"第{ch_num}章:\n{ch_content}\n\n"
+        else:
+            previous_chapters_text = "这是第一章，无历史章节内容"
+        
         task = TaskMessage(
             task_id=f"{kwargs['task_id']}_write",
             sender="coordinator",
@@ -1212,7 +1274,7 @@ class Coordinator:
                 "chapter_plan": kwargs.get('plan'),
                 "chapter_outline": kwargs.get('chapter_outline'),
                 "active_clues": kwargs.get('active_clues', []),
-                "previous_chapter": kwargs.get('previous_chapter'),
+                "previous_chapters_text": previous_chapters_text,
                 "novel_outline": kwargs.get('novel_outline'),
                 "target_word_count": kwargs.get('target_word_count'),
                 "style_guide": kwargs.get('style_guide')
@@ -1257,7 +1319,8 @@ class Coordinator:
                 "chapter_content": kwargs.get('chapter_content'),
                 "chapter_outline": kwargs.get('chapter_outline'),
                 "active_clues": kwargs.get('active_clues', []),
-                "style_requirements": kwargs.get('style_requirements')
+                "style_requirements": kwargs.get('style_requirements'),
+                "max_tokens": kwargs.get('max_tokens', 8000)
             },
             priority=3
         )
@@ -1299,7 +1362,8 @@ class Coordinator:
                 "chapter_content": kwargs.get('chapter_content'),
                 "chapter_outline": kwargs.get('chapter_outline'),
                 "active_clues": kwargs.get('active_clues', []),
-                "original_plan": kwargs.get('original_plan')
+                "original_plan": kwargs.get('original_plan'),
+                "max_tokens": kwargs.get('max_tokens', 8000)
             },
             priority=5
         )

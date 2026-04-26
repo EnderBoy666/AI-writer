@@ -22,12 +22,14 @@ chapter_settings = ChapterSettings()
 init_db()
 
 # 批量生成章节的函数
-def batch_generate_chapters(novel_id, start_chapter, batch_count, word_count, temperature, clue_threshold, auto_add_clue, error_handling="❌ 停止生成", clue_count=2, additional_prompt="", retry_count=3, use_agent_mode=False, agent_target_audience="普通读者", agent_content_style="传统叙事", generate_next_chapter_guidance=False):
+def batch_generate_chapters(novel_id, start_chapter, batch_count, word_count, temperature, clue_threshold, auto_add_clue, error_handling="❌ 停止生成", clue_count=2, additional_prompt="", retry_count=3, use_agent_mode=False, agent_target_audience="普通读者", agent_content_style="传统叙事", agent_max_tokens=8000, generate_next_chapter_guidance=False, previous_chapter_count=1):
     # 确保 novel_id 是整数
     print(f"处理小说选择值：{novel_id}")
     print(f"错误处理方式：{error_handling}")
     print(f"批量生成参数：起始章节={start_chapter}, 数量={batch_count}, 重试次数={retry_count}")
     print(f"使用 Agent 模式：{use_agent_mode}")
+    print(f"传入历史章节数：{previous_chapter_count}")
+    print(f"Agent Max Tokens：{agent_max_tokens}")
     if additional_prompt:
         print(f"附加提示词：{additional_prompt}")
     
@@ -99,14 +101,22 @@ def batch_generate_chapters(novel_id, start_chapter, batch_count, word_count, te
                     
                     novel_title, novel_outline_full = novel[0], novel[2]
                     
-                    # 获取上一章内容
-                    previous_chapter = None
+                    # 获取历史章节内容和指导文字
+                    previous_chapters = []
+                    previous_chapter_guidance = None
                     if current_chapter > 1:
+                        start_chapter_num = max(1, current_chapter - previous_chapter_count)
                         chapters = get_novel_chapters(novel_id)
                         for ch in chapters:
-                            if ch[1] == current_chapter - 1:
-                                previous_chapter = ch[3]
-                                break
+                            if start_chapter_num <= ch[1] < current_chapter:
+                                previous_chapters.append({
+                                    'chapter_number': ch[1],
+                                    'content': ch[3],
+                                    'guidance': ch[4]
+                                })
+                        
+                        if previous_chapters:
+                            previous_chapter_guidance = previous_chapters[-1]['guidance']
                     
 
                     
@@ -115,12 +125,15 @@ def batch_generate_chapters(novel_id, start_chapter, batch_count, word_count, te
                         chapter_number=int(current_chapter),
                         chapter_theme=f"第{current_chapter}章",
                         novel_outline=novel_outline_full,
-                        previous_chapter=previous_chapter,
+                        active_clues=None,
+                        previous_chapters=previous_chapters,
+                        previous_chapter_guidance=previous_chapter_guidance,
                         target_audience=agent_target_audience,
                         content_style=agent_content_style,
                         target_word_count=int(word_count),
                         temperature=float(temperature),
-                        generate_next_chapter_guidance=generate_next_chapter_guidance
+                        generate_next_chapter_guidance=generate_next_chapter_guidance,
+                        max_tokens=int(agent_max_tokens)
                     )
                     
                     if result.get('success'):
@@ -133,10 +146,12 @@ def batch_generate_chapters(novel_id, start_chapter, batch_count, word_count, te
                         
                         # 保存章节到数据库
                         try:
-                            add_chapter(novel_id, current_chapter, chapter_title, formatted_content)
+                            next_chapter_guidance = result.get('next_chapter_guidance')
+                            add_chapter(novel_id, current_chapter, chapter_title, formatted_content, next_chapter_guidance)
                             chapter_content = formatted_content
                             success = True
                             print(f"第{current_chapter}章（Agent 模式）已保存")
+                            print(f"[调试] 格式化后章节内容长度：{len(formatted_content)}字")
                             break
                         except Exception as save_error:
                             print(f"保存第{current_chapter}章失败：{save_error}")
@@ -147,7 +162,7 @@ def batch_generate_chapters(novel_id, start_chapter, batch_count, word_count, te
                     print(f"第{attempt + 1}次 Agent 生成出错：{str(e)}")
             else:
                 # 普通模式
-                result = generate_chapter(novel_id, current_chapter, word_count, temperature, clue_threshold, additional_prompt=additional_prompt)
+                result = generate_chapter(novel_id, current_chapter, word_count, temperature, clue_threshold, additional_prompt=additional_prompt, generate_next_chapter_guidance=generate_next_chapter_guidance, previous_chapter_count=previous_chapter_count)
                 
                 if isinstance(result, tuple):
                     chapter_content, _ = result
@@ -173,9 +188,20 @@ def batch_generate_chapters(novel_id, start_chapter, batch_count, word_count, te
             # 自动添加线索
             if auto_add_clue:
                 print(f"正在为第{current_chapter}章添加线索...")
+                print(f"[调试] auto_add_clue=True，开始提取线索")
+                print(f"[调试] chapter_content长度：{len(chapter_content) if chapter_content else 0}字")
+                print(f"[调试] novel_outline长度：{len(novel_outline) if novel_outline else 0}字")
+                print(f"[调试] total_chapters：{total_chapters}")
+                print(f"[调试] clue_count：{clue_count}")
                 extracted_clues = extract_clues_from_chapter(chapter_content, current_chapter, novel_outline, total_chapters, clue_count)
-                for clue_text, clue_type, first_chapter, next_chapter in extracted_clues:
-                    add_clue(novel_id, clue_text, clue_type, first_chapter, next_chapter)
+                print(f"[调试] 提取到线索数量：{len(extracted_clues) if extracted_clues else 0}")
+                if extracted_clues:
+                    for clue_text, clue_type, first_chapter, next_chapter in extracted_clues:
+                        print(f"[调试] 添加线索：类型={clue_type}, 内容={clue_text[:50]}..., 首次出现章节={first_chapter}, 下次出现章节={next_chapter}")
+                        add_clue(novel_id, clue_text, clue_type, first_chapter, next_chapter)
+                    print(f"成功添加 {len(extracted_clues)} 条线索")
+                else:
+                    print("警告：未能提取到任何线索")
                 print("线索添加完成")
                 
         else:
@@ -349,6 +375,14 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
                     novel_title = gr.Textbox(label="📚 小说标题")
                     novel_prompt = gr.Textbox(label="💡 提示词", lines=3)
                     novel_outline = gr.Textbox(label="📋 小说大纲", lines=10)
+                    novel_total_chapters = gr.Number(
+                        label="📊 总章节数",
+                        value=5,
+                        minimum=1,
+                        maximum=10000,
+                        step=1,
+                        info="修改小说的总章节数"
+                    )
                 
                 with gr.Column(scale=1):
                     update_btn = gr.Button("✏️ 更新小说", variant="primary")
@@ -384,6 +418,14 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
                             value=1,
                             minimum=1,
                             step=1
+                        )
+                        previous_chapter_count = gr.Number(
+                            label="📚 传入历史章节数",
+                            value=1,
+                            minimum=1,
+                            maximum=50,
+                            step=1,
+                            info="生成新章节时，传入前面多少章的内容作为上下文（1表示仅传入上一章）"
                         )
                         word_count = gr.Slider(
                             label="📏 字数",
@@ -473,6 +515,15 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
                             value="传统叙事",
                             visible=False
                         )
+                        agent_max_tokens = gr.Number(
+                            label="📏 最大 Token 数",
+                            value=8000,
+                            minimum=2000,
+                            maximum=32000,
+                            step=1000,
+                            visible=False,
+                            info="润色和审核阶段的最大 Token 数（字数多时需调大此值，避免响应被截断）"
+                        )
                         generate_next_chapter_guidance = gr.Checkbox(
                             label="📝 生成下一章指导文字",
                             value=False,
@@ -485,13 +536,14 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
                         return {
                             agent_target_audience: gr.update(visible=use_agent),
                             agent_content_style: gr.update(visible=use_agent),
+                            agent_max_tokens: gr.update(visible=use_agent),
                             generate_next_chapter_guidance: gr.update(visible=use_agent)
                         }
                     
                     use_agent_mode.change(
                         fn=on_agent_mode_change,
                         inputs=use_agent_mode,
-                        outputs=[agent_target_audience, agent_content_style, generate_next_chapter_guidance]
+                        outputs=[agent_target_audience, agent_content_style, agent_max_tokens, generate_next_chapter_guidance]
                     )
                     
                     with gr.Row():
@@ -556,6 +608,13 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
                             minimum=1,
                             step=1
                         )
+                        clue_next_chapter = gr.Number(
+                            label="🔁 回收章节",
+                            value=None,
+                            minimum=1,
+                            step=1,
+                            info="该线索预计下次出现的章节（可选，留空表示未设定）"
+                        )
                         add_clue_btn = gr.Button("➕ 添加线索", variant="primary")
                         clue_status = gr.Textbox(label="操作状态", interactive=False)
                     
@@ -587,6 +646,13 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
                             value=1,
                             minimum=1,
                             step=1
+                        )
+                        clue_next_chapter_edit = gr.Number(
+                            label="🔁 回收章节",
+                            value=None,
+                            minimum=1,
+                            step=1,
+                            info="该线索预计下次出现的章节（可选，留空表示未设定）"
                         )
                     
                     with gr.Column(scale=1):
@@ -1048,15 +1114,15 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
     )
     
     # 绑定保存函数
-    def save_novel_to_db(clean_outline):
+    def save_novel_to_db(clean_outline, chapter_count_input, chapter_word_count_input):
         if not clean_outline:
             return "大纲不能为空"
         title = extract_title(clean_outline)
         # 确保提示词不为空
         prompt = prompt_input.value if prompt_input.value else f"{title}的小说"
         # 获取章节数和每章字数
-        total_chapters_val = int(chapter_count.value) if chapter_count.value else None
-        chapter_word_count_val = int(chapter_word_count.value) if chapter_word_count.value else None
+        total_chapters_val = int(chapter_count_input) if chapter_count_input else None
+        chapter_word_count_val = int(chapter_word_count_input) if chapter_word_count_input else None
         result = add_novel(title, prompt, clean_outline, total_chapters_val, chapter_word_count_val)
         
         # 记录使用统计
@@ -1078,7 +1144,7 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
     
     save_btn.click(
         fn=save_novel_to_db,
-        inputs=generated_outline_state,
+        inputs=[generated_outline_state, chapter_count, chapter_word_count],
         outputs=save_status
     )
     
@@ -1097,23 +1163,23 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
     # 绑定加载小说函数
     def load_novel(novel_id):
         if not novel_id:
-            return [0, "", "", ""]
+            return [0, "", "", "", 5]
         novel = get_novel_by_id(novel_id)
         if novel:
             # novel: (id, title, prompt, outline, total_chapters, chapter_word_count)
-            return [novel[0], novel[1], novel[2], novel[3]]
-        return [0, "", "", ""]
+            return [novel[0], novel[1], novel[2], novel[3], novel[4] if novel[4] else 5]
+        return [0, "", "", "", 5]
     
     novel_list_dropdown.change(
         fn=load_novel,
         inputs=novel_list_dropdown,
-        outputs=[novel_id, novel_title, novel_prompt, novel_outline]
+        outputs=[novel_id, novel_title, novel_prompt, novel_outline, novel_total_chapters]
     )
     
     # 绑定更新小说函数
     update_btn.click(
         fn=update_novel,
-        inputs=[novel_id, novel_title, novel_prompt, novel_outline],
+        inputs=[novel_id, novel_title, novel_prompt, novel_outline, novel_total_chapters],
         outputs=action_status
     )
     
@@ -1175,8 +1241,8 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
     # 生成章节（流式输出）
     def generate_chapter_wrapper(novel_id, chapter_num, word_count, temperature, clue_threshold, 
                                 use_agent_mode=False, agent_target_audience="普通读者", 
-                                agent_content_style="传统叙事", additional_prompt="", retry_count=3, 
-                                generate_next_chapter_guidance=False):
+                                agent_content_style="传统叙事", agent_max_tokens=8000, additional_prompt="", retry_count=3, 
+                                generate_next_chapter_guidance=False, previous_chapter_count=1):
         """章节生成包装函数，支持普通模式和多 Agent 模式"""
         
         # 多 Agent 模式
@@ -1196,17 +1262,31 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
                 print(f"\n[调试] 小说标题: {novel_title}")
                 print(f"[调试] 小说总纲长度: {len(novel_outline) if novel_outline else 0}字")
                 print(f"[调试] 小说总纲预览: {(novel_outline or '空')[:200]}...")
+                print(f"[调试] 传入历史章节数: {previous_chapter_count}")
                 
-                # 获取上一章内容
-                previous_chapter = None
+                # 获取历史章节内容和指导文字
+                previous_chapters = []
+                previous_chapter_guidance = None
                 if chapter_num > 1:
-                    prev_chapter_data = get_chapter_by_number(int(novel_id), int(chapter_num) - 1)
-                    if prev_chapter_data:
-                        # prev_chapter_data: (id, chapter_number, chapter_title, content)
-                        previous_chapter = prev_chapter_data[3]  # content在第4个位置
-                        print(f"[调试] 上一章内容长度: {len(previous_chapter) if previous_chapter else 0}字")
+                    start_chapter = max(1, chapter_num - previous_chapter_count)
+                    for ch_num in range(start_chapter, chapter_num):
+                        prev_chapter_data = get_chapter_by_number(int(novel_id), ch_num)
+                        if prev_chapter_data:
+                            # prev_chapter_data: (id, chapter_number, chapter_title, content, next_chapter_guidance)
+                            previous_chapters.append({
+                                'chapter_number': ch_num,
+                                'content': prev_chapter_data[3],  # content在第4个位置
+                                'guidance': prev_chapter_data[4]  # next_chapter_guidance在第5个位置
+                            })
+                            print(f"[调试] 第{ch_num}章内容长度: {len(prev_chapter_data[3])}字")
+                            if prev_chapter_data[4]:
+                                print(f"[调试] 第{ch_num}章指导文字长度: {len(prev_chapter_data[4])}字")
+                    
+                    # 使用最后一章的指导文字
+                    if previous_chapters and previous_chapters[-1]['guidance']:
+                        previous_chapter_guidance = previous_chapters[-1]['guidance']
                     else:
-                        print(f"[调试] 未找到第{chapter_num - 1}章")
+                        print(f"[调试] 未找到任何历史章节")
                 
 
                 
@@ -1229,12 +1309,14 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
                     chapter_theme=f"第{chapter_num}章",
                     novel_outline=novel_outline,
                     active_clues=active_clues,
-                    previous_chapter=previous_chapter,
+                    previous_chapters=previous_chapters,
+                    previous_chapter_guidance=previous_chapter_guidance,
                     target_audience=agent_target_audience,
                     content_style=agent_content_style,
                     target_word_count=int(word_count),
                     temperature=float(temperature),
-                    generate_next_chapter_guidance=generate_next_chapter_guidance
+                    generate_next_chapter_guidance=generate_next_chapter_guidance,
+                    max_tokens=int(agent_max_tokens)
                 )
                 
                 if result.get('success'):
@@ -1256,8 +1338,8 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
                                 delete_chapter(ch[0])
                                 break
                         
-                        # add_chapter 需要 4 个参数：novel_id, chapter_number, chapter_title, content
-                        add_chapter(int(novel_id), chapter_num, chapter_title, full_content)
+                        # add_chapter 参数：novel_id, chapter_number, chapter_title, content, next_chapter_guidance
+                        add_chapter(int(novel_id), chapter_num, chapter_title, full_content, next_chapter_guidance)
                         
                         # 构建输出
                         output = f"✓ 多 Agent 生成成功并保存\n质量评分：{review.get('quality_score', 0)}/100\n审核：{'通过' if review.get('passed') else '未通过'}\n\n{chapter_title}\n\n{full_content}"
@@ -1277,7 +1359,7 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
                 yield f"系统错误：{str(e)}", False
         else:
             # 普通模式 - 使用原有逻辑
-            for output in generate_chapter_streaming(novel_id, chapter_num, word_count, temperature, clue_threshold, additional_prompt, retry_count):
+            for output in generate_chapter_streaming(novel_id, chapter_num, word_count, temperature, clue_threshold, additional_prompt, retry_count, generate_next_chapter_guidance, previous_chapter_count):
                 if isinstance(output, tuple) and len(output) == 2:
                     yield output[0], True
                 else:
@@ -1286,8 +1368,8 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
     generate_chapter_btn.click(
         fn=generate_chapter_wrapper,
         inputs=[selected_novel_id, chapter_number, word_count, temperature, clue_threshold, 
-                use_agent_mode, agent_target_audience, agent_content_style, additional_prompt, retry_count, 
-                generate_next_chapter_guidance],
+                use_agent_mode, agent_target_audience, agent_content_style, agent_max_tokens, additional_prompt, retry_count, 
+                generate_next_chapter_guidance, previous_chapter_count],
         outputs=[chapter_content, show_clue_dialog],
         api_name="generate_chapter"
     )
@@ -1326,7 +1408,7 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
     # 批量生成章节
     batch_generate_btn.click(
         fn=batch_generate_chapters,
-        inputs=[selected_novel_id, chapter_number, batch_chapter_count, word_count, temperature, clue_threshold, auto_add_clue, error_handling, clue_count, additional_prompt, retry_count, use_agent_mode, agent_target_audience, agent_content_style, generate_next_chapter_guidance],
+        inputs=[selected_novel_id, chapter_number, batch_chapter_count, word_count, temperature, clue_threshold, auto_add_clue, error_handling, clue_count, additional_prompt, retry_count, use_agent_mode, agent_target_audience, agent_content_style, agent_max_tokens, generate_next_chapter_guidance, previous_chapter_count],
         outputs=[batch_status],
         api_name="batch_generate_chapters"
     )
@@ -1385,14 +1467,17 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
 
     
     # 绑定添加线索函数
-    def add_new_clue(novel_id, text, clue_type, chapter):
+    def add_new_clue(novel_id, text, clue_type, chapter, next_chapter=None):
         if not novel_id:
             return "请选择小说"
-        return add_clue(novel_id, text, clue_type, chapter)
+        # 如果 next_chapter 为 0 或空，转换为 None
+        if next_chapter is None or next_chapter == 0:
+            next_chapter = None
+        return add_clue(novel_id, text, clue_type, chapter, next_chapter)
     
     add_clue_btn.click(
         fn=add_new_clue,
-        inputs=[selected_novel_id, clue_text, clue_type, clue_chapter],
+        inputs=[selected_novel_id, clue_text, clue_type, clue_chapter, clue_next_chapter],
         outputs=clue_status
     )
     
@@ -1412,30 +1497,40 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
     )
     
     # 加载线索
-    def load_clue(clue_id):
+    def load_clue(clue_id, novel_id):
         try:
             if not clue_id:
-                return [0, "", "明潮", 1]
+                return [0, "", "明潮", 1, None]
             # 获取线索内容
-            clues = get_novel_clues(selected_novel_id.value)
+            clues = get_novel_clues(novel_id)
             for clue in clues:
                 if clue[0] == clue_id:
-                    return [clue_id, clue[1], clue[2], clue[3]]
-            return [0, "", "明潮", 1]
+                    # clue: (id, clue_text, clue_type, first_chapter, next_chapter)
+                    return [clue_id, clue[1], clue[2], clue[3], clue[4]]
+            return [0, "", "明潮", 1, None]
         except Exception as e:
             print(f"Error in load_clue: {e}")
-            return [0, "", "明潮", 1]
+            return [0, "", "明潮", 1, None]
     
     clue_list_dropdown.change(
         fn=load_clue,
-        inputs=clue_list_dropdown,
-        outputs=[clue_id, clue_text_edit, clue_type_edit, clue_chapter_edit]
+        inputs=[clue_list_dropdown, selected_novel_id],
+        outputs=[clue_id, clue_text_edit, clue_type_edit, clue_chapter_edit, clue_next_chapter_edit]
     )
     
     # 绑定更新线索函数
+    def update_clue(clue_id, text, clue_type, first_chapter, next_chapter):
+        if not clue_id:
+            return "请选择线索"
+        # 如果 next_chapter 为 0 或空，转换为 None
+        if next_chapter is None or next_chapter == 0:
+            next_chapter = None
+        # 更新完整线索信息
+        return update_clue(clue_id, text, clue_type, first_chapter, next_chapter)
+    
     update_clue_btn.click(
-        fn=update_clue_next_chapter,
-        inputs=[clue_id, clue_chapter_edit],
+        fn=update_clue,
+        inputs=[clue_id, clue_text_edit, clue_type_edit, clue_chapter_edit, clue_next_chapter_edit],
         outputs=clue_action_status
     )
     
@@ -1855,4 +1950,4 @@ with gr.Blocks(title=gradio_settings.title, theme=gradio_settings.theme) as demo
     )
 
 if __name__ == "__main__":
-    demo.launch(theme=gradio_settings.theme, share=True)
+    demo.launch(theme=gradio_settings.theme)

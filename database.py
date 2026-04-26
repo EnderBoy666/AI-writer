@@ -51,10 +51,21 @@ def init_db():
         chapter_number INTEGER NOT NULL,
         chapter_title TEXT NOT NULL,
         content TEXT NOT NULL,
+        next_chapter_guidance TEXT,  -- 下一章指导文字
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (novel_id) REFERENCES {db_settings.db_table} (id)
     )
     """)
+    
+    # 检查章节表是否需要添加 next_chapter_guidance 列
+    cursor.execute(f"""
+    PRAGMA table_info({db_settings.chapter_table});
+    """)
+    chapter_columns = [column[1] for column in cursor.fetchall()]
+    if 'next_chapter_guidance' not in chapter_columns:
+        cursor.execute(f"""
+        ALTER TABLE {db_settings.chapter_table} ADD COLUMN next_chapter_guidance TEXT;
+        """)
     
     # 创建线索表
     cursor.execute(f"""
@@ -122,12 +133,17 @@ def get_novel_by_id(novel_id):
     conn.close()
     return novel
 
-def update_novel(novel_id, title, prompt, outline):
+def update_novel(novel_id, title, prompt, outline, total_chapters=None):
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
-    cursor.execute(f"""
-    UPDATE {db_settings.db_table} SET title = ?, prompt = ?, outline = ? WHERE id = ?
-    """, (title, prompt, outline, novel_id))
+    if total_chapters is not None:
+        cursor.execute(f"""
+        UPDATE {db_settings.db_table} SET title = ?, prompt = ?, outline = ?, total_chapters = ? WHERE id = ?
+        """, (title, prompt, outline, total_chapters, novel_id))
+    else:
+        cursor.execute(f"""
+        UPDATE {db_settings.db_table} SET title = ?, prompt = ?, outline = ? WHERE id = ?
+        """, (title, prompt, outline, novel_id))
     conn.commit()
     conn.close()
     return "小说已更新"
@@ -139,6 +155,8 @@ def delete_novel(novel_id):
     cursor.execute(f"""
     DELETE FROM {db_settings.chapter_table} WHERE novel_id = ?
     """, (novel_id,))
+    # 删除小说的所有线索
+    cursor.execute(f"DELETE FROM clues WHERE novel_id = ?", (novel_id,))
     # 删除小说
     cursor.execute(f"""
     DELETE FROM {db_settings.db_table} WHERE id = ?
@@ -148,12 +166,12 @@ def delete_novel(novel_id):
     return "小说已删除"
 
 # 章节相关函数
-def add_chapter(novel_id, chapter_number, chapter_title, content):
+def add_chapter(novel_id, chapter_number, chapter_title, content, next_chapter_guidance=None):
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
     cursor.execute(f"""
-    INSERT INTO {db_settings.chapter_table} (novel_id, chapter_number, chapter_title, content) VALUES (?, ?, ?, ?)
-    """, (novel_id, chapter_number, chapter_title, content))
+    INSERT INTO {db_settings.chapter_table} (novel_id, chapter_number, chapter_title, content, next_chapter_guidance) VALUES (?, ?, ?, ?, ?)
+    """, (novel_id, chapter_number, chapter_title, content, next_chapter_guidance))
     conn.commit()
     conn.close()
     return "章节已保存"
@@ -162,7 +180,7 @@ def get_novel_chapters(novel_id):
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
     cursor.execute(f"""
-    SELECT id, chapter_number, chapter_title, content, created_at FROM {db_settings.chapter_table} WHERE novel_id = ? ORDER BY chapter_number ASC
+    SELECT id, chapter_number, chapter_title, content, next_chapter_guidance, created_at FROM {db_settings.chapter_table} WHERE novel_id = ? ORDER BY chapter_number ASC
     """, (novel_id,))
     chapters = cursor.fetchall()
     conn.close()
@@ -173,7 +191,7 @@ def get_chapter_by_number(novel_id, chapter_number):
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
     cursor.execute(f"""
-    SELECT id, chapter_number, chapter_title, content FROM {db_settings.chapter_table} 
+    SELECT id, chapter_number, chapter_title, content, next_chapter_guidance FROM {db_settings.chapter_table} 
     WHERE novel_id = ? AND chapter_number = ?
     """, (novel_id, chapter_number))
     chapter = cursor.fetchone()
@@ -194,18 +212,18 @@ def get_chapter_by_id(chapter_id):
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
     cursor.execute(f"""
-    SELECT id, chapter_number, chapter_title, content FROM {db_settings.chapter_table} WHERE id = ?
+    SELECT id, chapter_number, chapter_title, content, next_chapter_guidance FROM {db_settings.chapter_table} WHERE id = ?
     """, (chapter_id,))
     chapter = cursor.fetchone()
     conn.close()
     return chapter
 
-def update_chapter(chapter_id, chapter_number, chapter_title, content):
+def update_chapter(chapter_id, chapter_number, chapter_title, content, next_chapter_guidance=None):
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
     cursor.execute(f"""
-    UPDATE {db_settings.chapter_table} SET chapter_number = ?, chapter_title = ?, content = ? WHERE id = ?
-    """, (chapter_number, chapter_title, content, chapter_id))
+    UPDATE {db_settings.chapter_table} SET chapter_number = ?, chapter_title = ?, content = ?, next_chapter_guidance = ? WHERE id = ?
+    """, (chapter_number, chapter_title, content, next_chapter_guidance, chapter_id))
     conn.commit()
     conn.close()
     return "章节已更新"
@@ -219,6 +237,15 @@ def delete_chapter(chapter_id):
     conn.commit()
     conn.close()
     return "章节已删除"
+
+def delete_clues_by_novel(novel_id):
+    """删除小说的所有线索"""
+    conn = sqlite3.connect(db_settings.db_path)
+    cursor = conn.cursor()
+    cursor.execute(f"DELETE FROM clues WHERE novel_id = ?", (novel_id,))
+    conn.commit()
+    conn.close()
+    return "线索已删除"
 
 # 线索相关函数
 def add_clue(novel_id, clue_text, clue_type, first_chapter, next_chapter=None):
@@ -251,6 +278,16 @@ def update_clue_next_chapter(clue_id, next_chapter):
     conn.close()
     return "线索已更新"
 
+def update_clue(clue_id, clue_text, clue_type, first_chapter, next_chapter=None):
+    conn = sqlite3.connect(db_settings.db_path)
+    cursor = conn.cursor()
+    cursor.execute(f"""
+    UPDATE clues SET clue_text = ?, clue_type = ?, first_chapter = ?, next_chapter = ? WHERE id = ?
+    """, (clue_text, clue_type, first_chapter, next_chapter, clue_id))
+    conn.commit()
+    conn.close()
+    return "线索已更新"
+
 def delete_clue(clue_id):
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
@@ -261,18 +298,7 @@ def delete_clue(clue_id):
     conn.close()
     return "线索已删除"
 
-# 章节大纲相关函数
-def add_chapter_outline(novel_id, chapter_number, chapter_title, outline):
-    conn = sqlite3.connect(db_settings.db_path)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-    INSERT INTO chapter_outlines (novel_id, chapter_number, chapter_title, outline) 
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(novel_id, chapter_number) 
-    DO UPDATE SET chapter_title = excluded.chapter_title, outline = excluded.outline
-    """, (novel_id, chapter_number, chapter_title, outline))
-    conn.commit()
-    conn.close()
+
 
 
 # 使用统计相关函数

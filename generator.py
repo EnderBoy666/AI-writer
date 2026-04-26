@@ -202,11 +202,12 @@ def extract_title(outline):
     return "未知标题"
 
 # 生成章节的函数
-def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_threshold=3, additional_prompt=""):
+def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_threshold=3, additional_prompt="", generate_next_chapter_guidance=False, previous_chapter_count=1):
     start_time = time.time()
     
     # 确保 novel_id 是整数
     print(f"处理小说选择值：{novel_id}")
+    print(f"传入历史章节数：{previous_chapter_count}")
     
     if not novel_id:
         return "无效的小说 ID"
@@ -228,20 +229,41 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
     print(f"小说标题：{novel_title}")
     print(f"总章节数：{total_chapters}")
     
-    # 获取上一章节内容
-    previous_chapter = None
+    # 获取历史章节内容（根据传入数量）
+    previous_chapters = []
+    previous_chapter_guidance = None
+    
     if chapter_number > 1:
-        print("正在获取上一章节内容...")
+        print(f"正在获取前{min(previous_chapter_count, chapter_number - 1)}章内容...")
         conn = sqlite3.connect(db_settings.db_path)
         cursor = conn.cursor()
-        cursor.execute(f"""
-        SELECT content FROM {db_settings.chapter_table} WHERE novel_id = ? AND chapter_number = ?
-        """, (novel_id, chapter_number - 1))
-        previous = cursor.fetchone()
+        
+        # 获取最近的 previous_chapter_count 章
+        start_chapter = max(1, chapter_number - previous_chapter_count)
+        for ch_num in range(start_chapter, chapter_number):
+            cursor.execute(f"""
+            SELECT content, next_chapter_guidance FROM {db_settings.chapter_table} WHERE novel_id = ? AND chapter_number = ?
+            """, (novel_id, ch_num))
+            chapter_data = cursor.fetchone()
+            if chapter_data:
+                previous_chapters.append({
+                    'chapter_number': ch_num,
+                    'content': chapter_data[0],
+                    'guidance': chapter_data[1]
+                })
+                print(f"已获取第{ch_num}章内容（长度：{len(chapter_data[0])}字）")
+                if chapter_data[1]:
+                    print(f"第{ch_num}章指导文字长度：{len(chapter_data[1])}字")
+        
         conn.close()
-        if previous:
-            previous_chapter = previous[0]
-            print("已获取上一章节内容")
+        
+        # 使用最后一章的指导文字
+        if previous_chapters and previous_chapters[-1]['guidance']:
+            previous_chapter_guidance = previous_chapters[-1]['guidance']
+            print(f"已获取最新章指导文字")
+        
+        if not previous_chapters:
+            print(f"警告：未找到第 {start_chapter}-{chapter_number - 1} 章的记录")
     
     # 获取小说的线索
     print("正在获取小说线索...")
@@ -273,7 +295,7 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
         print("当前没有需要激活的线索")
     
     # 构建系统提示
-    system_prompt = f"""你是一位专业的小说作家，擅长根据大纲和上一章节生成新的章节。
+    system_prompt = f"""你是一位专业的小说作家，擅长根据大纲和历史章节生成新的章节。
 
 【当前任务】
 请生成第{chapter_number}章的内容
@@ -286,8 +308,22 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
 【小说总纲】
 {outline}
 
-【上一章内容】
-{previous_chapter if previous_chapter else '这是第一章，无上一章内容'}
+"""
+    
+    # 添加历史章节内容
+    if previous_chapters:
+        system_prompt += "【历史章节内容】\n"
+        for ch_data in previous_chapters:
+            ch_num = ch_data['chapter_number']
+            ch_content = ch_data['content']
+            system_prompt += f"第{ch_num}章:\n{ch_content}\n\n"
+        system_prompt += f"【最新章指导文字】\n{previous_chapter_guidance if previous_chapter_guidance else '无指导文字'}\n"
+    else:
+        system_prompt += f"""【上一章内容】
+这是第一章，无上一章内容
+
+【上一章指导文字】
+无指导文字
 """
     
     # 添加线索信息（仅在有线索时提供，让 AI 自主决定是否使用）
@@ -413,9 +449,30 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
     if existing_chapter:
         return f"章节 {chapter_number} 已经存在，请修改章节编号"
     
+    # 生成下一章指导文字（如果需要）
+    next_chapter_guidance = None
+    if generate_next_chapter_guidance:
+        print("正在生成下一章指导文字...")
+        try:
+            next_chapter_guidance = _generate_guidance_for_next_chapter(
+                novel_title=novel_title,
+                novel_outline=outline,
+                current_chapter_number=chapter_number,
+                current_chapter_content=chapter_content,
+                active_clues=all_active_clues,
+                total_chapters=total_chapters,
+                temperature=temperature
+            )
+            if next_chapter_guidance:
+                print("下一章指导文字生成成功")
+            else:
+                print("下一章指导文字生成失败，将保存空值")
+        except Exception as e:
+            print(f"生成下一章指导文字时出错：{str(e)}")
+    
     # 保存章节
     print("正在保存章节...")
-    add_chapter(novel_id, chapter_number, chapter_title, chapter_content)
+    add_chapter(novel_id, chapter_number, chapter_title, chapter_content, next_chapter_guidance)
     print("章节保存成功")
     
     # 更新线索的下次出现时间
@@ -473,20 +530,92 @@ def generate_chapter(novel_id, chapter_number, word_count, temperature, clue_thr
     
     return chapter_content, True
 
+# 生成下一章指导文字的函数
+def _generate_guidance_for_next_chapter(novel_title, novel_outline, current_chapter_number, current_chapter_content, active_clues, total_chapters, temperature):
+    """
+    生成下一章的指导文字
+    
+    Args:
+        novel_title: 小说标题
+        novel_outline: 小说大纲
+        current_chapter_number: 当前章节编号
+        current_chapter_content: 当前章节内容
+        active_clues: 活跃线索列表
+        total_chapters: 小说总章节数
+        temperature: 生成温度
+    """
+    next_chapter_num = current_chapter_number + 1
+    
+    # 构建线索信息
+    clues_text = ""
+    if active_clues:
+        clues_parts = []
+        for clue in active_clues:
+            if len(clue) >= 3:
+                clue_text = clue[1]
+                clue_type = clue[2]
+                next_info = f"（预计在第{clue[4]}章再次出现）" if len(clue) > 4 and clue[4] else "（待收束）"
+                clues_parts.append(f"- [{clue_type}] {clue_text} {next_info}")
+        clues_text = '\n'.join(clues_parts)
+    else:
+        clues_text = "暂无活跃线索"
+    
+    prompt = f"""你是一位专业的小说编辑和指导者。请基于以下信息为第{next_chapter_num}章生成一段指导文字。
+
+【小说信息】
+- 小说标题：{novel_title}
+- 当前章节：第{current_chapter_number}章
+- 小说总章节数：{total_chapters}章
+
+【当前章节内容（节选）】
+{current_chapter_content[:1000] if current_chapter_content else '暂无内容'}
+
+【小说总纲】
+{novel_outline[:1000] if novel_outline else '暂无总纲'}
+
+【活跃线索】
+{clues_text}
+
+【指导文字要求】
+1. 分析当前章节的结局和遗留问题
+2. 为下一章提供明确的方向和建议
+3. 提示需要收束或发展的线索
+4. 建议可能的情节发展方向
+5. 保持与小说总纲的一致性
+6. 语言简洁明了，重点突出
+7. 不超过800字
+
+请为第{next_chapter_num}章生成一段专业、实用的指导文字。"""
+    
+    try:
+        response = client.generate(
+            model=ollama_settings.model,
+            prompt=prompt,
+            options={"temperature": temperature, "max_tokens": 1500, "thinking": deepseek_settings.enable_thinking}
+        )
+        guidance = response.get("response", "").strip()
+        return guidance if guidance else None
+    except Exception as e:
+        print(f"生成指导文字失败：{str(e)}")
+        return None
+
 # 生成章节的函数（流式输出版本）
-def generate_chapter_streaming(novel_id, chapter_number, word_count, temperature, clue_threshold=3, additional_prompt="", retry_count=3):
+def generate_chapter_streaming(novel_id, chapter_number, word_count, temperature, clue_threshold=3, additional_prompt="", retry_count=3, generate_next_chapter_guidance=False, previous_chapter_count=1):
     """
     流式输出版本的章节生成函数
     实时显示生成进度和章节内容
     
     Args:
         retry_count: 生成失败时的重试次数
+        generate_next_chapter_guidance: 是否生成下一章指导文字
+        previous_chapter_count: 传入历史章节数
     """
     start_time = time.time()
     
     # 确保 novel_id 是整数
     print(f"处理小说选择值：{novel_id}")
     print(f"重试次数设置：{retry_count}")
+    print(f"传入历史章节数：{previous_chapter_count}")
     
     if not novel_id:
         yield "无效的小说 ID"
@@ -513,22 +642,40 @@ def generate_chapter_streaming(novel_id, chapter_number, word_count, temperature
     progress_text += f"总章节数：{total_chapters}\n"
     yield progress_text
     
-    # 获取上一章节内容
-    previous_chapter = None
+    # 获取历史章节内容和指导文字
+    previous_chapters = []
+    previous_chapter_guidance = None
     if chapter_number > 1:
-        progress_text += "正在获取上一章节内容...\n"
+        progress_text += f"正在获取历史章节内容...\n"
         yield progress_text
         
         conn = sqlite3.connect(db_settings.db_path)
         cursor = conn.cursor()
-        cursor.execute(f"""
-        SELECT content FROM {db_settings.chapter_table} WHERE novel_id = ? AND chapter_number = ?
-        """, (novel_id, chapter_number - 1))
-        previous = cursor.fetchone()
+        
+        start_chapter = max(1, chapter_number - previous_chapter_count)
+        for ch_num in range(start_chapter, chapter_number):
+            cursor.execute(f"""
+            SELECT content, next_chapter_guidance FROM {db_settings.chapter_table} WHERE novel_id = ? AND chapter_number = ?
+            """, (novel_id, ch_num))
+            chapter_data = cursor.fetchone()
+            if chapter_data:
+                previous_chapters.append({
+                    'chapter_number': ch_num,
+                    'content': chapter_data[0],
+                    'guidance': chapter_data[1]
+                })
+                progress_text += f"已获取第{ch_num}章内容（长度：{len(chapter_data[0])}字）\n"
+                if chapter_data[1]:
+                    progress_text += f"第{ch_num}章指导文字长度：{len(chapter_data[1])}字\n"
+        
         conn.close()
-        if previous:
-            previous_chapter = previous[0]
-            progress_text += "已获取上一章节内容\n"
+        
+        if previous_chapters and previous_chapters[-1]['guidance']:
+            previous_chapter_guidance = previous_chapters[-1]['guidance']
+            progress_text += f"已获取最新章指导文字\n"
+        
+        if not previous_chapters:
+            progress_text += f"警告：未找到第 {start_chapter}-{chapter_number - 1} 章的记录\n"
             yield progress_text
     
     # 获取小说的线索
@@ -552,11 +699,26 @@ def generate_chapter_streaming(novel_id, chapter_number, word_count, temperature
         yield progress_text
     
     # 构建系统提示
-    system_prompt = f"你是一位专业的小说作家，擅长根据大纲和上一章节生成新的章节。请根据以下信息生成第{chapter_number}章。\n"
+    system_prompt = f"你是一位专业的小说作家，擅长根据大纲和历史章节生成新的章节。请根据以下信息生成第{chapter_number}章。\n"
     system_prompt += f"小说标题：{novel_title}\n"
     system_prompt += f"小说大纲：{outline}\n"
-    if previous_chapter:
-        system_prompt += f"上一章节内容：{previous_chapter}\n"
+    
+    if previous_chapters:
+        system_prompt += "\n【历史章节内容】\n"
+        for ch_data in previous_chapters:
+            ch_num = ch_data['chapter_number']
+            ch_content = ch_data['content']
+            system_prompt += f"第{ch_num}章:\n{ch_content}\n\n"
+        if previous_chapter_guidance:
+            system_prompt += f"【最新章指导文字】\n{previous_chapter_guidance}\n"
+            progress_text += f"[调试] 系统提示中已包含最新章指导文字\n"
+        else:
+            progress_text += f"[调试] 系统提示中将不包含指导文字\n"
+    else:
+        system_prompt += f"【上一章内容】\n这是第一章，无上一章内容\n"
+        progress_text += f"[调试] 系统提示中将不包含历史章节内容（这是第一章）\n"
+    
+    yield progress_text
     
     # 添加线索信息（仅在有线索时提供，让 AI 自主决定是否使用）
     if active_clues:
@@ -712,9 +874,32 @@ def generate_chapter_streaming(novel_id, chapter_number, word_count, temperature
         yield f"\n错误：章节 {chapter_number} 已经存在，请修改章节编号"
         return
     
+    # 生成下一章指导文字（如果需要）
+    next_chapter_guidance = None
+    if generate_next_chapter_guidance:
+        progress_text += "\n正在生成下一章指导文字...\n"
+        yield progress_text
+        try:
+            next_chapter_guidance = _generate_guidance_for_next_chapter(
+                novel_title=novel_title,
+                novel_outline=outline,
+                current_chapter_number=chapter_number,
+                current_chapter_content=chapter_content,
+                active_clues=active_clues,
+                total_chapters=total_chapters,
+                temperature=temperature
+            )
+            if next_chapter_guidance:
+                progress_text += "下一章指导文字生成成功\n"
+            else:
+                progress_text += "下一章指导文字生成失败，将保存空值\n"
+        except Exception as e:
+            progress_text += f"生成下一章指导文字时出错：{str(e)}\n"
+        yield progress_text
+    
     # 保存章节
     print("正在保存章节...")
-    add_chapter(novel_id, chapter_number, chapter_title, chapter_content)
+    add_chapter(novel_id, chapter_number, chapter_title, chapter_content, next_chapter_guidance)
     progress_text += "\n章节已保存到数据库\n"
     yield progress_text
     
@@ -803,6 +988,10 @@ def generate_chapter_streaming(novel_id, chapter_number, word_count, temperature
     
     # 返回章节内容和一个标志，表示生成成功
     progress_text += "\n章节生成完成！\n"
+    
+    # 添加下一章指导文字（如果有）
+    if next_chapter_guidance:
+        progress_text += f"\n=== 第{chapter_number + 1}章指导文字 ===\n{next_chapter_guidance}\n"
     
     # 记录使用统计
     try:
@@ -908,62 +1097,172 @@ def remove_duplicate_content(content, min_repeat_sentences=3):
 # 从章节内容中提取线索的函数
 def extract_clues_from_chapter(chapter_content, chapter_number, novel_outline, total_chapters, clue_count=2):
     """
-    使用 AI 从章节内容中提取线索，并根据大纲推测预计出现章节数
+    使用 AI 从章节内容中逐条提取线索，并根据大纲推测预计出现章节数
+    每次生成时传入已生成的线索，避免重复
     """
     try:
         # 输入验证
         if not chapter_content or not isinstance(chapter_content, str):
+            print("[线索提取] 章节内容为空或类型不正确")
             return []
         
-        # 构建系统提示，使用文本格式而非 JSON
-        system_prompt = f"你是一位专业的小说编辑，擅长从小说章节中识别和提取线索。请从以下章节内容中提取{clue_count}个重要的线索，包括明潮和暗涌两种类型。\n\n要求：\n1. 分析章节内容，识别出{clue_count}个重要的线索\n2. 为每条线索指定类型（明潮或暗涌）\n3. 基于小说大纲，推测每条线索的预计下次出现章节数\n4. 输出格式为：每条线索两行，第一行为「类型：线索内容」，第二行为「预计出现章节：X」\n5. 确保线索格式规范，内容简洁明了\n6. 只输出线索，不输出其他内容"
+        print(f"[线索提取] 开始提取线索，目标数量：{clue_count}")
+        print(f"[线索提取] 章节内容长度：{len(chapter_content)}字")
+        print(f"[线索提取] 大纲长度：{len(novel_outline) if novel_outline else 0}字")
         
-        # 调用 AI 生成线索
-        response = client.generate(
-            model=ollama_settings.model,
-            prompt=f"{system_prompt}\n\n章节内容：{chapter_content}\n\n小说大纲：{novel_outline}",
-            options={"temperature": 0.5, "max_tokens": token_settings.max_tokens_clue_extraction, "thinking": deepseek_settings.enable_thinking}
-        )
-        
-        # 处理响应
         clues = []
-        lines = response["response"].split('\n')
-        i = 0
-        while i < len(lines) and len(clues) < clue_count:
-            line = lines[i].strip()
-            if line and '：' in line:
-                parts = line.split('：', 1)
-                if len(parts) == 2:
-                    clue_type = parts[0].strip()
-                    clue_text = parts[1].strip()
-                    if clue_type in ["明潮", "暗涌"]:
-                        # 规范线索格式，确保内容简洁
-                        clue_text = clue_text.strip().rstrip('。')
-                        if clue_text:
-                            # 尝试获取预计出现章节数
-                            next_chapter = None
-                            if i + 1 < len(lines):
-                                next_line = lines[i + 1].strip()
-                                if next_line.startswith("预计出现章节："):
-                                    try:
-                                        next_chapter_str = next_line.split("：")[1].strip()
-                                        next_chapter = int(next_chapter_str)
-                                        # 确保章节数在合理范围内
-                                        if next_chapter < chapter_number:
-                                            next_chapter = chapter_number + 1
-                                        if total_chapters and next_chapter > total_chapters:
-                                            next_chapter = total_chapters
-                                    except (ValueError, IndexError):
-                                        # 如果解析失败，使用默认值
-                                        pass
-                            clues.append((clue_text, clue_type, chapter_number, next_chapter))
-                            i += 2  # 跳过下一行
-                            continue
-            i += 1
         
+        for clue_index in range(clue_count):
+            print(f"\n[线索提取] 开始生成第 {clue_index + 1} 条线索...")
+            
+            # 构建已生成线索的描述
+            existing_clues_text = ""
+            if clues:
+                existing_clues_text = "\n【本章已生成的线索】（请避免重复）\n"
+                for i, (clue_text, clue_type, first_chapter, next_chapter) in enumerate(clues):
+                    existing_clues_text += f"{i + 1}. 类型：{clue_type}\n"
+                    existing_clues_text += f"   内容：{clue_text}\n"
+                    if next_chapter:
+                        existing_clues_text += f"   预计回收章节：第{next_chapter}章\n"
+                existing_clues_text += "\n"
+            
+            # 构建系统提示，要求逐条生成
+            system_prompt = (
+                f"你是一位专业的小说编辑，擅长从小说章节中识别和提取线索，以供后面的生成使用。不是续写，也不是总结，只是提取线索。\n"
+                f"请根据提供的章节内容、小说大纲和总章节数，提取 1 条重要的线索。回收章节为预计何时续上这个线索的章节号。\n\n"
+                f"【输出格式要求】\n"
+                f"必须严格按照以下三行格式输出，不要有任何其他内容：\n"
+                f"类型：明潮（或暗涌）\n"
+                f"回收章节：X（X为预计下次出现的章节数字）\n"
+                f"内容：线索的简要描述（30-100个汉字）\n"
+                f"【注意事项】\n"
+                f"1. 类型只能是「明潮」或「暗涌」二选一，不要用英文或其他词汇。\n"
+                f"2. 「回收章节」必须是阿拉伯数字，表示预计这条线索下次会出现的章节号。\n"
+                f"   - 回收章节必须大于当前章节，不能是本章或之前的章节。\n"
+                f"   - 回收章节不能超过小说总章节数。\n"
+                f"   - 请根据小说大纲和情节发展，合理推测线索的回收时机。\n"
+                f"3. 线索内容必须简洁明确，30-100个汉字。\n"
+                f"4. 只输出这三行，禁止输出任何其他内容、标题、解释或英文单词。\n"
+            )
+            
+            # 用户提示，包含章节内容、大纲和总章节数
+            user_prompt = (
+                f"【当前章节内容】\n{chapter_content[:3000]}\n\n"
+                f"【小说大纲】\n{novel_outline[:2000]}\n\n"
+                f"【当前章节号】{chapter_number}\n"
+                f"【小说总章节数】{total_chapters if total_chapters else '未知'}"
+            )
+            if existing_clues_text:
+                user_prompt += f"\n{existing_clues_text}"
+            
+            # 调用 AI 生成单条线索
+            print("[线索提取] 调用 AI 生成线索...")
+            try:
+                response = client.chat(
+                    model=ollama_settings.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    stream=False,
+                    think=False,  # 禁用思考模式
+                    options={
+                        "temperature": 0.6,
+                        "num_predict": 500,
+                    }
+                )
+                
+                # 获取响应内容
+                if hasattr(response, 'message') and response.message:
+                    ai_response = response.message.content
+                elif isinstance(response, dict):
+                    ai_response = response.get('message', {}).get('content', '')
+                else:
+                    print(f"[线索提取] 未知响应格式：{type(response)}")
+                    ai_response = ''
+                
+                # 过滤掉思考过程
+                if ai_response:
+                    # 方法1：过滤 <think> 标签内容
+                    import re
+                    think_pattern = re.compile(r'<think>.*?</think>', re.DOTALL)
+                    ai_response = think_pattern.sub('', ai_response).strip()
+                    
+                    # 方法2：过滤 "思考过程" 等关键词开头的内容
+                    if 'Thinking Process:' in ai_response or '思考过程' in ai_response:
+                        parts = ai_response.split('\n\n', 1)
+                        if len(parts) > 1:
+                            ai_response = parts[1].strip()
+                
+                print(f"[线索提取] AI 响应长度：{len(ai_response)}字")
+                print(f"[线索提取] AI 响应预览：\n{ai_response[:200]}")
+            except Exception as api_error:
+                print(f"[线索提取] API 调用异常：{str(api_error)}")
+                import traceback
+                traceback.print_exc()
+                break  # 如果 API 出错，停止生成后续线索
+            
+            # 解析响应
+            import re
+            clue_type = None
+            next_chapter = None
+            clue_text = None
+            
+            lines = ai_response.strip().split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # 匹配类型行
+                if line.startswith('类型：') or line.startswith('类型:'):
+                    clue_type_raw = line.split('：' if '：' in line else ':', 1)[1].strip()
+                    if '明潮' in clue_type_raw:
+                        clue_type = '明潮'
+                    elif '暗涌' in clue_type_raw:
+                        clue_type = '暗涌'
+                    else:
+                        clue_type = '明潮'  # 默认
+                
+                # 匹配回收章节行
+                elif line.startswith('回收章节：') or line.startswith('回收章节:'):
+                    try:
+                        next_chapter_str = line.split('：' if '：' in line else ':', 1)[1].strip()
+                        # 提取数字
+                        num_match = re.search(r'(\d+)', next_chapter_str)
+                        if num_match:
+                            next_chapter = int(num_match.group(1))
+                            # 验证章节号合理性
+                            if next_chapter <= chapter_number:
+                                next_chapter = chapter_number + 1
+                            if total_chapters and next_chapter > total_chapters:
+                                next_chapter = total_chapters
+                    except (ValueError, IndexError):
+                        pass
+                
+                # 匹配内容行
+                elif line.startswith('内容：') or line.startswith('内容:'):
+                    clue_text = line.split('：' if '：' in line else ':', 1)[1].strip()
+                    clue_text = clue_text.rstrip('。').strip()
+            
+            # 验证并保存线索
+            if clue_type and clue_text and len(clue_text) >= 5:
+                clues.append((clue_text, clue_type, chapter_number, next_chapter))
+                print(f"[线索提取] 成功提取第 {clue_index + 1} 条线索：")
+                print(f"  - 类型：{clue_type}")
+                print(f"  - 回收章节：{'第' + str(next_chapter) + '章' if next_chapter else '未指定'}")
+                print(f"  - 内容：{clue_text}")
+            else:
+                print(f"[线索提取] 第 {clue_index + 1} 条线索解析失败，跳过...")
+                print(f"  - clue_type: {clue_type}")
+                print(f"  - clue_text: {clue_text}")
+        
+        print(f"\n[线索提取] 提取完成，共 {len(clues)} 条线索")
         return clues
     except Exception as e:
         print(f"提取线索时出错：{str(e)}")
+        import traceback
+        traceback.print_exc()
         return []
 
 # 压缩生成章节的函数（基于前文压缩）
@@ -1024,7 +1323,7 @@ def generate_chapter_with_compression(novel_id, chapter_number, word_count, temp
     conn = sqlite3.connect(db_settings.db_path)
     cursor = conn.cursor()
     cursor.execute(f"""
-    SELECT chapter_number, content FROM {db_settings.chapter_table} 
+    SELECT chapter_number, content, next_chapter_guidance FROM {db_settings.chapter_table} 
     WHERE novel_id = ? 
     ORDER BY chapter_number
     """, (novel_id,))
@@ -1054,14 +1353,22 @@ def generate_chapter_with_compression(novel_id, chapter_number, word_count, temp
         # 添加保留的近期章节
         if recent_chapters:
             context += "=== 近期章节（详细内容） ===\n"
-            for ch_num, ch_content in recent_chapters:
-                context += f"第{ch_num}章:\n{ch_content}\n\n"
+            for ch_num, ch_content, ch_guidance in recent_chapters:
+                context += f"第{ch_num}章:\n{ch_content}\n"
+                if ch_guidance:
+                    context += f"指导文字：{ch_guidance}\n\n"
+                else:
+                    context += "\n"
     else:
         # 章节数较少，直接使用所有章节
         if all_chapters:
             context += "=== 前文章节 ===\n"
-            for ch_num, ch_content in all_chapters:
-                context += f"第{ch_num}章:\n{ch_content}\n\n"
+            for ch_num, ch_content, ch_guidance in all_chapters:
+                context += f"第{ch_num}章:\n{ch_content}\n"
+                if ch_guidance:
+                    context += f"指导文字：{ch_guidance}\n\n"
+                else:
+                    context += "\n"
     
     # 获取小说的线索
     print("正在获取小说线索...")
@@ -1209,8 +1516,12 @@ def compress_previous_chapters(novel_id, old_chapters, recent_chapters,
     
     # 构建压缩请求
     old_chapters_text = ""
-    for ch_num, ch_content in old_chapters:
-        old_chapters_text += f"第{ch_num}章:\n{ch_content}\n\n"
+    for ch_num, ch_content, ch_guidance in old_chapters:
+        old_chapters_text += f"第{ch_num}章:\n{ch_content}\n"
+        if ch_guidance:
+            old_chapters_text += f"指导文字：{ch_guidance}\n\n"
+        else:
+            old_chapters_text += "\n"
     
     system_prompt = f"""你是一位专业的小说编辑，擅长对小说章节进行压缩摘要。请对以下旧章节内容进行压缩，提取关键情节、角色发展和重要线索。
 
@@ -1239,7 +1550,7 @@ def compress_previous_chapters(novel_id, old_chapters, recent_chapters,
         if not summary:
             # 如果压缩失败，返回简化版本
             summary = "前文章节摘要：\n"
-            for ch_num, ch_content in old_chapters:
+            for ch_num, ch_content, _ in old_chapters:
                 # 简单提取每章的前 200 字
                 first_part = ch_content[:200].strip()
                 summary += f"第{ch_num}章：{first_part}...\n"
@@ -1249,7 +1560,7 @@ def compress_previous_chapters(novel_id, old_chapters, recent_chapters,
         print(f"压缩前文时出错：{str(e)}")
         # 返回简化版本
         summary = "前文章节摘要：\n"
-        for ch_num, ch_content in old_chapters:
+        for ch_num, ch_content, _ in old_chapters:
             first_part = ch_content[:200].strip()
             summary += f"第{ch_num}章：{first_part}...\n"
         return summary
