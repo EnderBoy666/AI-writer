@@ -1,3 +1,4 @@
 \data\novels\*
 \.venv
 \__pycache__
+*\novels

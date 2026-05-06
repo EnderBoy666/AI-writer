@@ -8,11 +8,11 @@ openai_settings=OpenaiSettings()
 
 def filter_think_tags(text: str) -> str:
     """
-    过滤  ...  标签及其内部的所有内容
+    过滤 <think>...</think> 标签及其内部的所有内容
     支持：单行、多行、大小写不敏感、标签带属性（如 <think class="x">）
     """
-    # 正则表达式：匹配 <think ...> 到  之间所有内容
-    pattern = re.compile(r'<think.*?>.*?', re.DOTALL | re.IGNORECASE)
+    # 正则表达式：匹配 <think ...> 到 </think> 之间所有内容
+    pattern = re.compile(r'<think.*?>.*?</think>', re.DOTALL | re.IGNORECASE)
     return pattern.sub('', text)
 
 def generate(prompts, user,max_token):
