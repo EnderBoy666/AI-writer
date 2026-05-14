@@ -20,11 +20,11 @@ def create_outline(prompts,total_chapters,slite_num,node_num,max_token,better_ou
         "chapter_outline":[],
         "enities":[]
     }
-    x=generate.generate(f"""请根据一下这段提示词生成一个小说的简介，要求包含以下内容:
-                        1.输出格式为：第一行为文章标题，随后为文章的简介,简介大约300字
-                        2.禁用一切markdown格式，禁用其他所有输出
+    x=generate.generate(f"""请根据一下这段提示词生成一个小说的简介，要求包含以下内容:\
+                        \n1.输出格式为：第一行为文章标题，随后为文章的简介,简介大约300字\
+                        \n2.禁用一切markdown格式，禁用其他所有输出
                         提示词为:{prompts}"""
-        ,"user",max_token)
+        ,"user",max_token,tool=[])
     if x.status_code == 200:
         outline["name"] = x.json()["choices"][0]["message"]["content"].split("\n")[0]
         outline["introduction"] = x.json()["choices"][0]["message"]["content"]
@@ -35,15 +35,14 @@ def create_outline(prompts,total_chapters,slite_num,node_num,max_token,better_ou
         return f"{x.status_code}:{x.text}"
 
     status+="\n开始生成总纲...\n"
-    x=generate.generate(f"""请跟据以下要求和提示词生成一份小说大纲
-                        1.分为{node_num}各节点，总共预计为{total_chapters}章
-                        2.输出格式为：节点x（第a章-第b章）：内容。
-                        3.每一个节点应包含情节，人物变化等信息
-                        4.禁用markdown和其他多余输出。关键实体必须给出名称，大纲不能过于笼统，尽量具体详细，遵循提示词
-                        5.在生成完节点后，在生成一段世界设定与人物设定
-                        6.用户提示词：{prompts}
-                        7.小说简介：{outline['introduction']}
-                        ""","user",max_token)
+    x=generate.generate(f"请跟据以下要求和提示词生成一份小说大纲\
+                        \n1.分为{node_num}各节点，总共预计为{total_chapters}章\
+                        \n2.输出格式为：节点x（第a章-第b章）：内容。\
+                        \n3.每一个节点应包含情节，人物变化等信息\
+                        \n4.禁用markdown和其他多余输出。关键实体必须给出名称，大纲不能过于笼统，尽量具体详细，遵循提示词\
+                        \n5.在生成完节点后，在生成一段世界观与人物设定\
+                        \n6.用户提示词：{prompts}\
+                        \n7.小说简介：{outline['introduction']}","user",max_token,tool=[])
     if x.status_code == 200:
         outline["total_outline"] = x.json()["choices"][0]["message"]["content"]
         status+=x.json()["choices"][0]["message"]["content"]
@@ -55,8 +54,8 @@ def create_outline(prompts,total_chapters,slite_num,node_num,max_token,better_ou
     if(better_outline==True):
         status+="\n正在提取实体名单\n"
         yield status
-        prompts=f"请从大纲中提取出关键实体名单，要求：每一行一个实体名，重复的实体（如别名，代号等）只用输出一个，禁用任何markdown和其他多于输出.大纲如下{outline['total_outline']}"
-        x=generate.generate(prompts,user="user",max_token=max_token)
+        prompts=f"请从大纲中提取出关键实体名单，要求：每一行一个实体名，重复的实体（如别名，代号等）只用输出一个,请勿输出重复的实体，禁用任何markdown和其他多于输出.大纲如下{outline['total_outline']}"
+        x=generate.generate(prompts,user="user",max_token=max_token,tool=[])
         if x.status_code == 200:
             enities=x.json()["choices"][0]["message"]["content"].split("\n")
             status+=x.json()["choices"][0]["message"]["content"]
@@ -66,8 +65,8 @@ def create_outline(prompts,total_chapters,slite_num,node_num,max_token,better_ou
         for i in range(len(enities)):
             status+=f"\n正在提取实体{enities[i]}的信息({i+1}/{len(enities)})\n"
             yield status
-            prompts=f"请在以下大纲中寻找和实体有关的信息,可以适当扩写但不能偏离大纲，实体名{enities[i]}。输出格式：实体每一个变化占一行，第一行为初始状态。格式为‘第x章’-‘第y章’：内容。禁用一切markdown格式和其他多余输出。大纲如下:{outline["total_outline"]}"
-            x=generate.generate(prompts=prompts,user="user",max_token=max_token)
+            prompts=f"请在以下大纲中寻找和实体有关的信息,可以适当扩写但不能偏离大纲，实体名{enities[i]}。输出格式：实体每一个变化占一行，第一行为实体的简介。格式为‘第x章’-‘第y章’：内容。禁用一切markdown格式和其他多余输出。大纲如下:{outline["total_outline"]}"
+            x=generate.generate(prompts=prompts,user="user",max_token=max_token,tool=[])
             if x.status_code == 200:
                 outline["enities"].append(x.json()["choices"][0]["message"]["content"])
                 status+=x.json()["choices"][0]["message"]["content"]
@@ -80,17 +79,37 @@ def create_outline(prompts,total_chapters,slite_num,node_num,max_token,better_ou
     for i in range(slite_num):
         status+=f"\n当前拆分{i+1}/{slite_num}:\n"
         yield status
-        prompts=f"""请跟据以下要求和提示词生成一份的章节大纲
-                        1.整本小说总共预计为{total_chapters}章.
-                        2.注意：你生成的不是某一本小说，而是其中的一部分。你只需要生成按照拆分次数分配后的一小部分。节点为情节节点数，与拆分次数无关
-                        3.输出格式为：第一行为章节名：章节标题，随后转行输出内容。最后对后面的章节进行一小段指导文字。如果是最后一次拆分就不用编写指导文字
-                        4.每一个章节应包含情节，人物，地点等信息
-                        5.禁用markdown和其他多余输出,生成章节大纲而不是一整章的内容
-                        6.用户提示词：{prompts}
-                        7.小说简介：{outline['introduction']}
-                        8.小说总纲：{outline["total_outline"]}
-                        9.当前位于第{i+1}次拆分，共拆分{slite_num}次
-                        """
+        tool=[{
+        "type": "function",
+        "function": {
+            "name": "get_chapter_outline",
+            "description": "获取之前生成的章节大纲",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "novel_name": { 
+                        "type": "string", 
+                        "description": "小说的名字" 
+                    },
+                    "chapter_outline_id": { 
+                        "type": "integer", 
+                        "description": "要查询的过往的章节大纲索引"
+                    }
+                },
+                "required": ["novel_name","chapter_outline_id"]
+            }
+        }
+        }]
+        prompts=f"请跟据以下要求和提示词生成一份的章节大纲\
+            \n1.整本小说总共预计为{total_chapters}章\
+            \n2.注意：你生成的不是某一本小说，而是其中的一部分。你只需要生成按照拆分次数分配后的一小部分。节点为情节节点数，与拆分次数无关\
+            \n3.输出格式为：第一行为章节名：章节标题，随后转行输出内容。最后对后面的章节进行一小段指导文字。如果是最后一次拆分就不用编写指导文字\
+            \n4.每一个章节应包含情节，人物，地点等信息。如果遇到不了解的信息可以使用工具\
+            \n5.禁用markdown和其他多余输出,生成章节大纲而不是一整章的内容\
+            \n6.用户提示词：{prompts}\
+            \n7.小说简介：{outline['introduction']}\
+            \n8.小说总纲：{outline["total_outline"]}\
+            \n9.当前位于第{i+1}次拆分，共拆分{slite_num}次"
         if(i!=0):
             prompts+=f"\n10.上一段章节大纲：{outline['chapter_outline'][i-1]}"
         if(i!=slite_num-1):
@@ -100,9 +119,10 @@ def create_outline(prompts,total_chapters,slite_num,node_num,max_token,better_ou
         if(i==slite_num-1):
             prompts+=f"\n注意：小说已到结尾结尾部分，此为最后一次拆分"
         #print(prompts)
-        x=generate.generate(prompts,"user",max_token)
+        x=generate.generate(prompts,"user",max_token,tool=tool)
         if x.status_code == 200:
-            outline["chapter_outline"].append(x.json()["choices"][0]["message"]["content"])
+            outline["chapter_outline"].append({"content":"","enities":[]})
+            outline["chapter_outline"][i]["content"]=x.json()["choices"][0]["message"]["content"]
             status+=x.json()["choices"][0]["message"]["content"]
             yield status
 
@@ -113,10 +133,11 @@ def create_outline(prompts,total_chapters,slite_num,node_num,max_token,better_ou
         if(better_outline==True):
             status+="\n正在查找有关实体...\n"
             yield status
-            prompts=f"请从以下下章节大纲中找出是否有和以下实体有关的信息。章节大纲如下{x.json()["choices"][0]["message"]["content"]},输出格式：返回对应的实体的数字id（例如给出的实体为'1.青云宗'就返回1),每一行有且仅有一个数字id\n禁用一切markdown格式和多余输出"
+            prompts=f"请从以下下章节大纲中找出是否有和以下实体有关的信息。章节大纲如下{x.json()["choices"][0]["message"]["content"]},输出格式：返回对应的实体的数字 id（例如给出的实体为'1.青云宗'就返回 1),每一行有且仅有一个数字 id\
+                \n禁用一切 markdown 格式和多余输出"
             for j in range(len(enities)):
                 prompts+=f"{j}.{enities[j]}\n"
-            x=generate.generate(prompts=prompts,user="user",max_token=max_token)
+            x=generate.generate(prompts=prompts,user="user",max_token=max_token,tool=[])
             if x.status_code == 200:
                 chapter_enities=x.json()["choices"][0]["message"]["content"].split("\n")
                 status+=x.json()["choices"][0]["message"]["content"]
@@ -126,7 +147,7 @@ def create_outline(prompts,total_chapters,slite_num,node_num,max_token,better_ou
                 return f"{x.status_code}:{x.text}"
             
             if(chapter_enities[0].isdigit()==False):
-                x=generate.generate(prompts=f"请以每行一个数字id的格式输出，原输出为{chapter_enities},实体列表为{enities}",user="user",max_token=max_token)
+                x=generate.generate(prompts=f"请以每行一个数字 id 的格式输出，原输出为{chapter_enities},实体列表为{enities},一个实体输出一次即可，切勿重复输出",user="user",max_token=max_token,tool=[])
                 if x.status_code == 200:
                     chapter_enities=x.json()["choices"][0]["message"]["content"].split("\n")
                     status+=x.json()["choices"][0]["message"]["content"]
@@ -134,7 +155,21 @@ def create_outline(prompts,total_chapters,slite_num,node_num,max_token,better_ou
                     yield status
                 else:
                     return f"{x.status_code}:{x.text}"
-            prompts=f"请根据以下实体的信息，优化这一段章节大纲，要求：\n1.遵循总纲和章节大纲，对章节大纲中与总纲和实体信息不合理的地方进行矫正即可\n2.禁用markdown格式和其余多余输出\n3.输出格式：与给出的章节大纲相同\n总昂如下:{outline['total_outline']}\n章节大纲如下{outline['chapter_outline'][i]}"
+            
+            # 过滤出有效的数字 ID
+            valid_enities = []
+            for entity_id in chapter_enities:
+                entity_id = entity_id.strip()
+                if entity_id.isdigit() and 0 <= int(entity_id) < len(enities):
+                    valid_enities.append(int(entity_id))
+            
+            outline["chapter_outline"][i]["enities"]=valid_enities
+            """
+            prompts=f"请根据以下实体的信息，优化这一段章节大纲，要求：\
+                \n1.遵循总纲和章节大纲，对章节大纲中与总纲和实体信息不合理的地方进行矫正即可,注意修改的是章节大纲，这只是总纲的一部分\
+                \n2.禁用markdown格式和其余多余输出\
+                \n3.输出格式：与给出的章节大纲相同\n总昂如下:{outline['total_outline']}\
+                \n章节大纲如下{outline['chapter_outline'][i]}"
             for j in range(len(chapter_enities)):
                 prompts+=f"\n{outline["enities"][int(chapter_enities[j])]}"
             print(prompts)
@@ -145,7 +180,7 @@ def create_outline(prompts,total_chapters,slite_num,node_num,max_token,better_ou
                 yield status
             else:
                 return f"{x.status_code}:{x.text}"
-
+            """
     status+="\n正在保存..."
     yield status
     with open("data/novel.json","r",encoding="utf-8") as file:
@@ -165,33 +200,93 @@ def create_outline(prompts,total_chapters,slite_num,node_num,max_token,better_ou
     yield status
 
 #创建章节
-def create_chapter(novel_id,latest_chapter,create_chapter_num,extra_prompts,max_token,word_count,better_chapter):
+def create_chapter(novel_id,latest_chapter,create_chapter_num,extra_prompts,max_token,word_count,better_chapter,enable_thinking,thinking_budget,max_thinking_tokens):
     with open(f"data/novels/{novel_id}.json","r",encoding="utf-8") as file:
         novel_info=json.load(file)
     status="开始创建章节...\n"
     yield status
+    
+    # 更新全局思考设置
+    from settings import OpenaiSettings
+    openai_settings = OpenaiSettings()
+    openai_settings.enable_thinking = enable_thinking
+    openai_settings.thinking_budget = thinking_budget
+    openai_settings.max_thinking_tokens = max_thinking_tokens
+    
     for i in range(create_chapter_num):
-        chapter_prompts=f"""你是一名专业的小说家。请根据以下要求，生成一章小说.本章大约有{word_count}字
-                          1.小说共有{novel_info["outline"]["total_chapters"]}章，当编写的是{latest_chapter+1}章
-                          2.请勿输出重复内容，避免叙事平铺直叙，确保上下文连贯，同时一切遵循大纲，不要过度偏离
-                          3.输出格式为：第一行为'第 x 章'：章节标题
-                          4.禁用一切 markdown 格式，直接输出文本，以流畅的中文输出
-                          5.小说总纲:{novel_info["outline"]["total_outline"]}
-                          6.当前章节大纲:{novel_info["outline"]["chapter_outline"][int((latest_chapter+1)/len(novel_info["outline"]["chapter_outline"]))]}
-                          7.用户附加提示词:{extra_prompts}"""
-        if(latest_chapter!=0):
-            chapter_prompts+=f"\n8.上一章内容:{novel_info["chapters"][latest_chapter-1]}"
-        x=generate.generate(chapter_prompts,user="user",max_token=max_token)
-        #print(chapter_prompts)
+        if(better_chapter==False):
+            chapter_prompts=f"你是一名专业的小说家。请根据以下要求，生成一章小说。本章大约有{word_count}字\
+                \n1.小说共有{novel_info["outline"]["total_chapters"]}章，当编写的是{latest_chapter+1}章\
+                \n2.请勿输出重复内容，避免叙事平铺直叙，确保上下文连贯，同时一切遵循大纲，不要过度偏离\
+                \n3.输出格式为：第一行为'第 x 章'：章节标题\
+                \n4.禁用一切 markdown 格式，直接输出文本，以流畅的中文输出\
+                \n5.小说总纲:{novel_info["outline"]["total_outline"]}\
+                \n6.当前章节大纲:{novel_info["outline"]["chapter_outline"][int((latest_chapter+1)/len(novel_info["outline"]["chapter_outline"]))]}\
+                \n7.用户附加提示词:{extra_prompts}"
+            if(latest_chapter!=0):
+                chapter_prompts+=f"\n8.上一章内容:{novel_info["chapters"][latest_chapter-1]["content"]}\n9.上一章指导文字{novel_info["chapters"][latest_chapter-1]['guid']}"
+            x=generate.generate(chapter_prompts,user="user",max_token=max_token,tool=[])
+        else:
+            # 更好的章节生成模式：多 Agent 协作 + 工具调用
+            status+=f"\n开始生成第{latest_chapter+1}章，使用多 Agent 协作模式...\n"
+            yield status
+            
+            # 使用多 agent 协作系统（生成器）
+            collaboration_gen = generate.multi_agent_collaboration(
+                novel_info=novel_info,
+                chapter_num=latest_chapter+1,
+                word_count=word_count,
+                extra_prompts=extra_prompts,
+                max_token=max_token,
+                thinking_budget=thinking_budget,
+                max_thinking_tokens=max_thinking_tokens
+            )
+            
+            # 遍历生成器获取最终结果
+            collaboration_result = None
+            for result in collaboration_gen:
+                status += result["status"]
+                yield status
+                collaboration_result = result
+            
+            if collaboration_result and collaboration_result["final_content"]:
+                x_content = collaboration_result["final_content"]
+                # 创建 mock 响应对象以兼容后续代码
+                class MockResponse:
+                    def __init__(self, content):
+                        self._content = content
+                        self.status_code = 200
+                    def json(self):
+                        return {
+                            "choices": [{
+                                "message": {"content": self._content}
+                            }]
+                        }
+                x = MockResponse(x_content)
+            else:
+                return f"多 agent 协作失败：{status}"
+        
         if x.status_code == 200:
             novel_info["chapters"].append({"title":x.json()["choices"][0]["message"]["content"].split("\n")[0],"content":x.json()["choices"][0]["message"]["content"]})
             status+=x.json()["choices"][0]["message"]["content"]
             yield status
         else:
             return f"{x.status_code}:{x.text}"
+        status+="\n正在生成指导文字\n"
+        yield status
+        x=generate.generate(prompts=f"请根据本章内容和章节大纲的内容生成一段指导文字，为接下来的章节生成做指导\
+                            \n总章节数：{novel_info["outline"]["total_chapters"]},当前章节{latest_chapter+1}\
+                            \n章节内容:{novel_info["chapters"][latest_chapter]["content"]}\
+                            \n总纲:{novel_info["outline"]["total_outline"]}\
+                            \n章节大纲:{novel_info["outline"]["chapter_outline"][int((latest_chapter+1)/len(novel_info["outline"]["chapter_outline"]))]}\
+                            \n要求：禁用 markdown 格式和其他多余输出，禁止输出半成品内容",user="user",max_token=max_token,tool=[])
+        if x.status_code == 200:
+            novel_info["chapters"][latest_chapter]['guid']=x.json()["choices"][0]["message"]["content"]
+            status+=x.json()["choices"][0]["message"]["content"]
+            yield status
+        else:
+            return f"{x.status_code}:{x.text}"
         status+=f"\n已生成了第{latest_chapter}章，内容如下:\n{x.json()["choices"][0]["message"]["content"]}\n"
-        if(better_chapter==True):
-            prompts="请根据总纲和章节内容是否大纲检查本章内容"
         latest_chapter+=1
         with open(f"data/novels/{novel_id}.json","w",encoding="utf-8") as file:
             novel_new=json.dumps(novel_info,ensure_ascii=False,indent=4)
@@ -218,7 +313,7 @@ def get_novel_chapter_outline(novel_id):
             novel_info=json.load(file)
         chapter_outline=[]
         for i in range(len(novel_info["outline"]["chapter_outline"])):
-            chapter_outline.append([i,novel_info["outline"]["chapter_outline"][i]])
+            chapter_outline.append([i,novel_info["outline"]["chapter_outline"][i]["content"]])
         return chapter_outline
     
 def get_novel_total_outline(novel_id):
@@ -315,14 +410,18 @@ with gr.Blocks() as app:
                 with gr.Column():
                     latest_chapter=gr.Number(value=get_lastest_chapter,inputs=[novel_id],every=0.5,label="最新章节")
                     chapter_prompts=gr.Textbox(label="附加提示词")
-                    chapter_max_toekn=gr.Slider(label="最大token",minimum=100000,maximum=4500000,value=400000)
+                    chapter_max_toekn=gr.Slider(label="最大 token",minimum=100000,maximum=4500000,value=400000)
                     chapter_count=gr.Slider(label="批量创建章节数",minimum=1,maximum=1500,value=1)
                     word_count=gr.Slider(label="章节字数",minimum=150,maximum=10000,value=2000)
-                    better_chapter=gr.Checkbox(label="是否开启更好的章节生成(可能非常耗token)")
+                    better_chapter=gr.Checkbox(label="是否开启更好的章节生成 (可能非常耗 token)")
+                    with gr.Accordion(label="高级设置（思考参数）", open=False):
+                        enable_thinking=gr.Checkbox(label="启用深度思考模式",value=True)
+                        thinking_budget=gr.Slider(label="思考 token 预算",minimum=1000,maximum=50000,value=12000,step=500)
+                        max_thinking_tokens=gr.Slider(label="最大思考 token 数",minimum=500,maximum=30000,value=8000,step=500)
                     create_chapter_btn=gr.Button(value="创建章节")
                 with gr.Column():
                     chapter_create_status=gr.Textbox(label="创建章节状态")
-                    create_chapter_btn.click(fn=create_chapter,inputs=[novel_id,latest_chapter,chapter_count,chapter_prompts,chapter_max_toekn,word_count,better_chapter],outputs=chapter_create_status)
+                    create_chapter_btn.click(fn=create_chapter,inputs=[novel_id,latest_chapter,chapter_count,chapter_prompts,chapter_max_toekn,word_count,better_chapter,enable_thinking,thinking_budget,max_thinking_tokens],outputs=chapter_create_status)
         with gr.Accordion("查看章节"):
             with gr.Accordion("章节列表"):
                 with gr.Row():

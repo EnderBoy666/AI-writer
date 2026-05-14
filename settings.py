@@ -6,12 +6,18 @@ class OpenaiSettings():
         self.timeout=1800
         self.add_token=50000
         self.retry=3
+        self.frequency_penalty=0.1
+        # 思考参数
+        self.enable_thinking=True  # 是否启用思考
+        self.thinking_budget=60000  # 思考 token 预算
+        self.max_thinking_tokens=100000  # 思考过程最大 token 数
 
 class WebSettings():
     def __init__(self):
         self.share=False
         self.port=7860
         self.server_name="0.0.0.0"
+        self.debug=True
 
 class NovelSettings():
     def __init__(self):
